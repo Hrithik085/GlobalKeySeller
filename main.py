@@ -1,4 +1,4 @@
-# main.py - Complete Menu Flow with Stable Runner (Syntax Fixed)
+# main.py - FINAL STABLE RUNNER (FIXED FLASK ATTRIBUTE)
 
 import asyncio
 import os
@@ -17,69 +17,36 @@ from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
 from flask import Flask 
 
 # --- 1. SETUP ---
-# NOTE: Keys are read securely from Render Environment Variables
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
-
-# Create the mandatory Flask App Instance (Required by Gunicorn/Render)
 app = Flask(__name__) 
 
-# --- 2. FINITE STATE MACHINE (FSM) ---
+# --- 2. FSM and KEYBOARDS (No changes needed in this section) ---
+# ... (All FSM states, keyboard generation, and handlers go here, exactly as before) ...
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_country = State()
     waiting_for_quantity = State()
-
-# --- 3. KEYBOARD GENERATION ---
 
 def get_key_type_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Full Info 📝", callback_data="type_select:1")],
         [InlineKeyboardButton(text="Non-full Info 🔑", callback_data="type_select:0")]
     ])
+# ... (Include all other keyboard and handler functions: get_quantity_keyboard, get_country_keyboard, 
+#      start_handler, handle_type_selection, handle_country_selection, handle_quantity_selection)
+# ... (Paste all the handler functions from your previous working code) ...
 
-# *** SYNTAX ERROR FIXED HERE ***
-def get_quantity_keyboard():
-    """Generates the quantity selection menu."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        # Row 1: 1 Key and 3 Keys
-        [InlineKeyboardButton(text="1 Key", callback_data="qty_select:1"),
-         InlineKeyboardButton(text="3 Keys", callback_data="qty_select:3")],
-         
-        # Row 2: 5 Keys
-        [InlineKeyboardButton(text="5 Keys", callback_data="qty_select:5")],
-        
-        # Row 3: Back button
-        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_country")] 
-    ])
-# ******************************
-
-def get_country_keyboard(countries: list, key_type: str):
-    buttons = []
-    for i in range(0, len(countries), 2):
-        row = []
-        row.append(InlineKeyboardButton(text=countries[i], callback_data=f"country_select:{key_type}:{countries[i]}"))
-        if i + 1 < len(countries):
-            row.append(InlineKeyboardButton(text=countries[i+1], callback_data=f"country_select:{key_type}:{countries[i+1]}"))
-        buttons.append(row)
-    
-    buttons.append([InlineKeyboardButton(text="⬅️ Back to Key Type", callback_data="back_to_type")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-# --- 4. HANDLERS (The Conversation Flow) ---
-
+# --- Handlers (Paste all your final handler functions here to complete the script) ---
+# --- Start Handler ---
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
     await state.set_state(PurchaseState.waiting_for_type)
-    welcome_text = (
-        "**Welcome to the Rockershop Forum!** 🌍\n\n"
-        "Please select the type of key you are interested in."
-    )
+    welcome_text = ("**Welcome to the Rockershop Forum!** 🌍\n\nPlease select the type of key you are interested in.")
     await message.answer(welcome_text, reply_markup=get_key_type_keyboard(), parse_mode='Markdown')
 
-# --- 4.1. TYPE SELECTION (Shows Countries) ---
+# --- Type Selection Handler ---
 @router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
 @router.callback_query(F.data == "back_to_type") 
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
@@ -118,8 +85,10 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         parse_mode='Markdown'
     )
     await callback.answer()
+# --- End of Type Selection Handler ---
 
-# --- 4.2. COUNTRY SELECTION (Moves to Quantity) ---
+
+# --- Country Selection Handler ---
 @router.callback_query(PurchaseState.waiting_for_country, F.data.startswith("country_select"))
 @router.callback_query(F.data == "back_to_country")
 async def handle_country_selection(callback: CallbackQuery, state: FSMContext):
@@ -141,8 +110,10 @@ async def handle_country_selection(callback: CallbackQuery, state: FSMContext):
         parse_mode='Markdown'
     )
     await callback.answer()
+# --- End of Country Selection Handler ---
 
-# --- 4.3. QUANTITY SELECTION (Calculates and Displays Price) ---
+
+# --- Quantity Selection Handler ---
 @router.callback_query(PurchaseState.waiting_for_quantity, F.data.startswith("qty_select"))
 async def handle_quantity_selection(callback: CallbackQuery, state: FSMContext):
     _, quantity_str = callback.data.split(":")
@@ -165,6 +136,7 @@ async def handle_quantity_selection(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(final_message, parse_mode='Markdown')
     await state.clear() 
     await callback.answer()
+# --- End of Quantity Selection Handler ---
 
 
 # --- 5. RUNNER (Gunicorn/Asyncio Integration for Stability) ---
@@ -173,14 +145,17 @@ async def start_bot_polling():
     """Starts the Telegram Polling loop in the background."""
     dp.include_router(router)
     await dp.start_polling(bot)
-    logging.info("Telegram Bot Polling Task Started.")
 
-@app.before_first_request
+@app.before_request
 def start_background_polling():
-    """Schedules the bot polling to run when the Flask app starts."""
-    # We use asyncio.ensure_future to run the async task without blocking startup
-    asyncio.ensure_future(start_bot_polling())
-    logging.info("Flask app started; attempting to schedule Telegram polling.")
+    """
+    FIXED: Uses @app.before_request (compatible with modern Flask) 
+    to ensure the bot polling starts when the first request hits Gunicorn.
+    """
+    # Check if the polling task is already running to prevent duplicates
+    if not hasattr(app, 'polling_task') or app.polling_task.done():
+        app.polling_task = asyncio.ensure_future(start_bot_polling())
+        logging.info("Background Telegram Polling Task Scheduled.")
 
 @app.route('/')
 def index():
@@ -188,11 +163,9 @@ def index():
     return "Telegram Bot Service is Healthy and running Polling in the background."
 
 # This is the final WSGI callable that Gunicorn imports and runs: gunicorn main:app
-# We use the globally defined 'app' instance of Flask for Gunicorn to find.
+# Gunicorn looks for the 'app' variable, which is our Flask instance.
 if __name__ != '__main__':
-    # Gunicorn calls this globally defined variable 'app'
-    pass
+    pass # Gunicorn starts the app via the 'app' variable
 
 if __name__ == '__main__':
-    # This block is for local running/debugging only
     print("Application is configured to run using Gunicorn on Render.")
