@@ -1,7 +1,7 @@
 # config.py
 import os
 
-BOT_TOKEN = "8363917872:AAHoUZUz5bTExVox55RdunozrdfqY_KEBFE" 
+BOT_TOKEN = "8330702607:AAHQdFy27Kqyx9RvEhJ528-q_72uzv9v8Xw"
 
 # Database URL will be set by Render's Environment Variables
 DATABASE_URL = os.getenv("DATABASE_URL")
