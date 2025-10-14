@@ -1,4 +1,4 @@
-# main.py - Complete Menu Flow with Stable Runner
+# main.py - Complete Menu Flow with Stable Runner (Syntax Fixed)
 
 import asyncio
 import os
@@ -39,13 +39,21 @@ def get_key_type_keyboard():
         [InlineKeyboardButton(text="Non-full Info 🔑", callback_data="type_select:0")]
     ])
 
+# *** SYNTAX ERROR FIXED HERE ***
 def get_quantity_keyboard():
+    """Generates the quantity selection menu."""
     return InlineKeyboardMarkup(inline_keyboard=[
+        # Row 1: 1 Key and 3 Keys
         [InlineKeyboardButton(text="1 Key", callback_data="qty_select:1"),
-         [InlineKeyboardButton(text="3 Keys", callback_data="qty_select:3")],
+         InlineKeyboardButton(text="3 Keys", callback_data="qty_select:3")],
+         
+        # Row 2: 5 Keys
         [InlineKeyboardButton(text="5 Keys", callback_data="qty_select:5")],
+        
+        # Row 3: Back button
         [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_country")] 
     ])
+# ******************************
 
 def get_country_keyboard(countries: list, key_type: str):
     buttons = []
@@ -86,10 +94,8 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         await state.set_state(PurchaseState.waiting_for_country)
 
     try:
-        # CRITICAL: This pulls the list of countries from the LIVE PostgreSQL DB
         countries = await get_available_countries(is_full_info)
     except Exception as e:
-        # If DB connection fails (e.g., during startup), tell the admin.
         countries = []
         logging.error(f"DB Error fetching countries: {e}") 
 
@@ -120,11 +126,9 @@ async def handle_country_selection(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     
     if callback.data != "back_to_country":
-        # Normal country selection
         _, is_full_info_str, country_code = callback.data.split(":")
         await state.update_data(country_code=country_code)
     else:
-        # 'Back' from Quantity selection, fetch stored country
         country_code = data['country_code']
 
     await state.set_state(PurchaseState.waiting_for_quantity)
@@ -143,7 +147,6 @@ async def handle_country_selection(callback: CallbackQuery, state: FSMContext):
 async def handle_quantity_selection(callback: CallbackQuery, state: FSMContext):
     _, quantity_str = callback.data.split(":")
     quantity = int(quantity_str)
-    
     data = await state.get_data()
     country_code = data['country_code']
     
@@ -162,6 +165,7 @@ async def handle_quantity_selection(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(final_message, parse_mode='Markdown')
     await state.clear() 
     await callback.answer()
+
 
 # --- 5. RUNNER (Gunicorn/Asyncio Integration for Stability) ---
 
@@ -184,14 +188,11 @@ def index():
     return "Telegram Bot Service is Healthy and running Polling in the background."
 
 # This is the final WSGI callable that Gunicorn imports and runs: gunicorn main:app
-# The Gunicorn server runs the synchronous Flask app, and the Flask app starts the 
-# asynchronous Telegram polling task in the background.
+# We use the globally defined 'app' instance of Flask for Gunicorn to find.
+if __name__ != '__main__':
+    # Gunicorn calls this globally defined variable 'app'
+    pass
 
 if __name__ == '__main__':
-    # When running locally (not via Gunicorn), use Flask's runner
-    main_app = app # Flask app instance
-    
-    # We need to install 'gunicorn' locally to test this accurately
-    # app.run(host='0.0.0.0', port=5000) 
-    # For now, we rely on Gunicorn on Render.
+    # This block is for local running/debugging only
     print("Application is configured to run using Gunicorn on Render.")
