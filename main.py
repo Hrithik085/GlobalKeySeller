@@ -1,5 +1,3 @@
-# main.py - FINAL PRODUCTION CODE (Daemon Thread Runner)
-
 import asyncio
 import os
 import logging
@@ -30,6 +28,7 @@ app = Flask(__name__)
 
 # --- Webhook Constants ---
 WEBHOOK_PATH = "/telegram" 
+# Use RENDER_EXTERNAL_HOSTNAME to get the base URL
 BASE_WEBHOOK_URL = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}" 
 
 
@@ -169,71 +168,67 @@ async def handle_quantity_selection(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# --- 5. WEBHOOK/GUNICORN INTEGRATION (The Fix is Here) ---
+# --- 5. WEBHOOK/GUNICORN INTEGRATION (Production Webhook Mode) ---
 
-# --- Asynchronous Telegram Runner for Daemon Thread ---
-async def start_telegram_runner():
-    """
-    This is the function that runs the Aiogram polling loop.
-    It is executed in a dedicated, non-blocking thread.
-    """
-    logging.info("Starting dedicated Telegram Polling loop...")
+# --- Asynchronous Telegram Setup Hook ---
+async def set_telegram_webhook():
+    """Sets the bot's webhook URL and clears any conflicts."""
+    full_webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
     
-    # 1. REMOVED THE delete_webhook CALL WHICH WAS CRASHING THE THREAD.
+    # 1. Ensure any old polling is cleared (just in case)
+    await bot(delete_webhook(drop_pending_updates=True))
     
-    # 2. Start the Polling loop. Telegram will now resolve the webhook conflict
-    # using the last known good command (which was deleteWebhook from the browser).
-    await dp.start_polling(bot)
-
-
-# --- Synchronous Flask/WSGI Runner ---
-def start_bot_daemon():
-    """Starts the Telegram Polling loop in a separate daemon thread."""
-    if not hasattr(app, 'bot_thread_started'):
-        
-        def run_asyncio_loop():
-            try:
-                # Create a new loop for this thread (critical fix for RuntimeError)
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                # Now, run the async function on this new, dedicated loop
-                loop.run_until_complete(start_telegram_runner())
-            except Exception as e:
-                # This log should catch any crash after the thread starts
-                logging.critical(f"Daemon Bot Runner crashed: {e}")
-
-        bot_thread = threading.Thread(target=run_asyncio_loop, daemon=True)
-        bot_thread.start()
-        
-        app.bot_thread_started = True
-        logging.info("Telegram Bot Daemon Thread Started.")
-
+    # 2. Set the Webhook for production
+    await bot(set_webhook(url=full_webhook_url))
+    logging.info(f"Telegram Webhook set to: {full_webhook_url}")
 
 @app.before_request
 def setup_bot_before_first_request():
     """
-    Called by Flask/Gunicorn on the first request to ensure the bot thread is alive.
+    Called by Flask/Gunicorn on the first request to ensure the webhook is set.
     """
-    if not hasattr(app, 'bot_thread_started'):
-        start_bot_daemon()
+    if not hasattr(app, 'webhook_setup_complete'):
+        # We need a dedicated loop for this initial async setup
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(set_telegram_webhook())
+            loop.close()
+            app.webhook_setup_complete = True
+            logging.info("Webhook setup routine finished.")
+        except Exception as e:
+            logging.critical(f"FATAL: Webhook setup crashed during startup: {e}")
+            # If the setup crashes, the bot will remain unresponsive.
 
 
 @app.route('/', methods=['GET'])
 def index():
     """The mandatory endpoint for Render health checks."""
-    return "Telegram Bot Service is Healthy and running Polling in the background."
+    return "Telegram Bot Service is Healthy and running Webhook mode."
 
 @app.route(WEBHOOK_PATH, methods=["POST"])
-def telegram_webhook():
+async def telegram_webhook():
     """
-    The fallback endpoint. We must return 200 OK immediately and ignore the update.
-    The primary connection is Polling.
+    The main production endpoint for receiving updates from Telegram.
+    Must be an ASYNC function for efficiency.
     """
+    try:
+        update_data: Dict[str, Any] = request.get_json(silent=True)
+        if update_data:
+            # Safely process the update in the Aiogram dispatcher
+            await dp.feed_update(bot, Update(**update_data))
+        
+    except Exception as e:
+        # Log any crash inside the handler logic
+        logging.exception(f"CRITICAL WEBHOOK PROCESSING ERROR: {e}") 
+        
+    # Must return 200 OK immediately
     return Response(status=200)
 
-# The WSGI callable: gunicorn main:app
+
+# The WSGI callable: gunicorn main:app (Gunicorn imports the 'app' variable)
 if __name__ != '__main__':
     pass 
 
 if __name__ == '__main__':
-    print("Application is configured to run using Daemon Thread on Render.")
+    print("Application is configured to run using Webhook on Render.")
