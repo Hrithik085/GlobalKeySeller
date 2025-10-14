@@ -1,4 +1,4 @@
 aiogram
 asyncpg
-Flask
+Flask[async]
 gunicorn 
