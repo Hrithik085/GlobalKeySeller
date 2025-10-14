@@ -3,3 +3,4 @@ asyncpg
 Flask[async]
 gunicorn[gevent]  # This is the key change!
 uvicorn    
+asgiref
