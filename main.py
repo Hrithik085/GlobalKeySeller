@@ -179,16 +179,10 @@ async def start_telegram_runner():
     """
     logging.info("Starting dedicated Telegram Polling loop...")
     
-    # 1. Clear any old webhook settings first (Essential Polling Setup)
-    # The API call itself uses the newly created asyncio loop, resolving the crash.
-    full_webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
-    try:
-        await bot(delete_webhook(drop_pending_updates=True))
-        logging.info("Cleared old webhook for Polling mode stability.")
-    except Exception as e:
-        logging.warning(f"Could not delete webhook during startup: {e}")
-        
-    # 2. Start the Polling loop
+    # 1. REMOVED THE delete_webhook CALL WHICH WAS CRASHING THE THREAD.
+    
+    # 2. Start the Polling loop. Telegram will now resolve the webhook conflict
+    # using the last known good command (which was deleteWebhook from the browser).
     await dp.start_polling(bot)
 
 
@@ -232,22 +226,9 @@ def index():
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def telegram_webhook():
     """
-    Receives webhooks (if a stale one exists) and processes them.
-    NOTE: This is the critical asynchronous wrapper to prevent blocking.
+    The fallback endpoint. We must return 200 OK immediately and ignore the update.
+    The primary connection is Polling.
     """
-    try:
-        update_data: Dict[str, Any] = request.get_json(silent=True)
-        if update_data:
-            # We use asyncio.run_coroutine_threadsafe to safely send the update
-            # from the synchronous Gunicorn worker thread to the asynchronous Bot thread.
-            asyncio.run_coroutine_threadsafe(
-                dp.feed_update(bot, Update(**update_data)),
-                loop=asyncio.get_event_loop()
-            )
-        
-    except Exception as e:
-        logging.exception(f"Webhook fallback processing error: {e}") 
-        
     return Response(status=200)
 
 # The WSGI callable: gunicorn main:app
