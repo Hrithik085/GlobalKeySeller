@@ -1,4 +1,5 @@
 aiogram
 asyncpg
-Flask[async]
-uvicorn
+Flask
+gunicorn[gevent]  # This is the key change!
+uvicorn    
