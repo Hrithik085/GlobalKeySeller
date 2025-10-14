@@ -211,8 +211,10 @@ async def telegram_webhook():
     This function is ASYNC and Uvicorn will execute it correctly.
     """
     try:
-        update_data: Dict[str, Any] = await request.get_json(silent=True)
+        # FIX: Removed await here. request.get_json is synchronous in Flask.
+        update_data: Dict[str, Any] = request.get_json(silent=True)
         if update_data:
+            # dp.feed_update is an awaitable call, so await is required here.
             await dp.feed_update(bot, Update(**update_data))
         
     except Exception as e:
