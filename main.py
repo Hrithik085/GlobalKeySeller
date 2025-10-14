@@ -1,9 +1,9 @@
-# main.py - FINAL PRODUCTION CODE (Webhook Version)
+# main.py - FINAL PRODUCTION CODE (Daemon Thread Runner)
 
 import asyncio
 import os
 import logging
-import json
+import threading # NEW IMPORT
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -19,37 +19,36 @@ from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
 from flask import Flask, request, Response 
 from typing import Dict, Any
 
-# Set up logging for easier debugging in Render logs
+# Set up logging 
 logging.basicConfig(level=logging.INFO)
 
 # --- 1. SETUP ---
-# NOTE: Keys are read securely from Render Environment Variables
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 app = Flask(__name__) 
 
 # --- Webhook Constants ---
-# Render provides the hostname, we set the path
 WEBHOOK_PATH = "/telegram" 
-# RENDER_EXTERNAL_HOSTNAME is set automatically by Render
 BASE_WEBHOOK_URL = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}" 
 
 
-# --- 2. FINITE STATE MACHINE (FSM) ---
+# --- 2. FSM and KEYBOARDS (All unchanged) ---
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_country = State()
     waiting_for_quantity = State()
 
-# --- 3. KEYBOARD GENERATION ---
+# --- All keyboard generation functions go here (Unchanged) ---
 def get_key_type_keyboard():
+    # ... (content remains the same)
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Full Info 📝", callback_data="type_select:1")],
         [InlineKeyboardButton(text="Non-full Info 🔑", callback_data="type_select:0")]
     ])
 
 def get_quantity_keyboard():
+    # ... (content remains the same)
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="1 Key", callback_data="qty_select:1"),
          InlineKeyboardButton(text="3 Keys", callback_data="qty_select:3")],
@@ -58,6 +57,7 @@ def get_quantity_keyboard():
     ])
 
 def get_country_keyboard(countries: list, key_type: str):
+    # ... (content remains the same)
     buttons = []
     for i in range(0, len(countries), 2):
         row = []
@@ -70,22 +70,21 @@ def get_country_keyboard(countries: list, key_type: str):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-# --- 4. HANDLERS (The Conversation Flow) ---
+# --- 4. HANDLERS (The Conversation Flow - Unchanged) ---
 dp.include_router(router) # Include router for processing updates
 
+# --- Start Handler (Unchanged) ---
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
-    # Clear state and set the initial state
     await state.clear()
     await state.set_state(PurchaseState.waiting_for_type)
-    
     welcome_text = (
         "**Welcome to the Rockershop Forum!** 🌍\n\n"
         "Please select the type of key you are interested in."
     )
     await message.answer(welcome_text, reply_markup=get_key_type_keyboard(), parse_mode='Markdown')
 
-# --- TYPE SELECTION (Shows Countries) ---
+# --- Type Selection Handler (Unchanged) ---
 @router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
 @router.callback_query(F.data == "back_to_type") 
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
@@ -100,7 +99,6 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         await state.set_state(PurchaseState.waiting_for_country)
 
     try:
-        # CRITICAL: This pulls the list of countries from the LIVE PostgreSQL DB
         countries = await get_available_countries(is_full_info)
     except Exception as e:
         countries = []
@@ -126,7 +124,7 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# --- COUNTRY SELECTION (Moves to Quantity) ---
+# --- COUNTRY SELECTION Handler (Unchanged) ---
 @router.callback_query(PurchaseState.waiting_for_country, F.data.startswith("country_select"))
 @router.callback_query(F.data == "back_to_country")
 async def handle_country_selection(callback: CallbackQuery, state: FSMContext):
@@ -149,7 +147,7 @@ async def handle_country_selection(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# --- QUANTITY SELECTION (Calculates and Displays Price) ---
+# --- QUANTITY SELECTION Handler (Unchanged) ---
 @router.callback_query(PurchaseState.waiting_for_quantity, F.data.startswith("qty_select"))
 async def handle_quantity_selection(callback: CallbackQuery, state: FSMContext):
     _, quantity_str = callback.data.split(":")
@@ -174,68 +172,87 @@ async def handle_quantity_selection(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# --- 5. WEBHOOK/GUNICORN INTEGRATION ---
+# --- 5. WEBHOOK/GUNICORN INTEGRATION (The Fix is Here) ---
+
+# --- Asynchronous Telegram Runner for Daemon Thread ---
+async def start_telegram_runner():
+    """
+    This is the function that runs the Aiogram polling loop.
+    It is executed in a dedicated, non-blocking thread.
+    """
+    logging.info("Starting dedicated Telegram Polling loop...")
+    
+    # 1. Clear any old webhook settings first
+    full_webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
+    await bot(delete_webhook(drop_pending_updates=True))
+    logging.info("Cleared old webhook for Polling mode stability.")
+    
+    # 2. Start the Polling loop
+    await dp.start_polling(bot)
+
+
+# --- Synchronous Flask/WSGI Runner ---
+def start_bot_daemon():
+    """Starts the Telegram Polling loop in a separate daemon thread."""
+    # We use a Thread to isolate the synchronous Gunicorn process from the asyncio loop.
+    if not hasattr(app, 'bot_thread_started'):
+        
+        # We need a function to run the asyncio loop (the start_telegram_runner)
+        def run_asyncio_loop():
+            try:
+                # Create a new loop for this thread (critical fix for RuntimeError)
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(start_telegram_runner())
+            except Exception as e:
+                logging.error(f"Daemon Bot Runner crashed: {e}")
+
+        bot_thread = threading.Thread(target=run_asyncio_loop, daemon=True)
+        bot_thread.start()
+        
+        app.bot_thread_started = True
+        logging.info("Telegram Bot Daemon Thread Started.")
+
+
+@app.before_request
+def setup_bot_before_first_request():
+    """
+    Called by Flask/Gunicorn on the first request to ensure the bot thread is alive.
+    We are using @app.before_request as the most stable hook for modern Flask.
+    """
+    if not hasattr(app, 'bot_thread_started'):
+        start_bot_daemon()
+
 
 @app.route('/', methods=['GET'])
 def index():
-    """Default endpoint for health checks (Render hits this)."""
-    return "Telegram Bot Webhook is Active."
+    """The mandatory endpoint for Render health checks."""
+    return "Telegram Bot Service is Healthy and running Polling in the background."
 
 @app.route(WEBHOOK_PATH, methods=["POST"])
 async def telegram_webhook():
     """
-    Receives updates from Telegram and hands them to Aiogram.
-    Made async to prevent Gunicorn workers from hanging.
+    Receives webhooks (if a stale one exists) and processes them.
+    NOTE: We are primarily using Polling, but this endpoint must exist 
+    and return 200 OK immediately.
     """
     try:
-        # Get the JSON data from Telegram
-        # We must use request.get_json(silent=True) to avoid Flask internal errors 
-        # if the request body is empty or malformed (Telegram sometimes sends garbage).
+        # We process the update to ensure it doesn't block the HTTP request
         update_data: Dict[str, Any] = request.get_json(silent=True)
-        if not update_data:
-            logging.warning("Received empty or malformed update body.")
-            return Response(status=200) # Send 200 OK anyway to satisfy Telegram
-
-        # Process the update using the Dispatcher
-        await dp.feed_update(bot, Update(**update_data))
+        if update_data:
+            asyncio.ensure_future(dp.feed_update(bot, Update(**update_data)))
         
     except Exception as e:
-        # Log the exception explicitly to the Render logs but do NOT fail the response
-        logging.exception(f"CRITICAL WEBHOOK PROCESSING ERROR: {e}") 
+        logging.exception(f"Webhook fallback processing error: {e}") 
         
-    # Always return 200 OK immediately to Telegram to prevent retries
     return Response(status=200)
 
-# --- 6. STARTUP/SHUTDOWN HOOKS ---
-
-async def set_telegram_webhook():
-    """Sets the bot's webhook URL on startup."""
-    full_webhook_url = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
-    
-    # 1. Clear any old polling or webhooks
-    await bot(delete_webhook(drop_pending_updates=True))
-    
-    # 2. Set the new webhook URL
-    await bot(set_webhook(url=full_webhook_url))
-    logging.info(f"Telegram Webhook set to: {full_webhook_url}")
-
-@app.before_request
-def start_webhook_setup():
-    """
-    Called by Flask/Gunicorn on the first request to ensure the webhook is set.
-    """
-    if not hasattr(app, 'webhook_set'):
-        # Use asyncio.ensure_future to run the async task without blocking the web server thread
-        asyncio.ensure_future(set_telegram_webhook())
-        app.webhook_set = True
-        logging.info("Webhook setup scheduled.")
-
-
-# This is the final WSGI callable that Gunicorn imports and runs: gunicorn main:app
-# Gunicorn looks for the 'app' variable, which is our Flask instance.
+# The WSGI callable: gunicorn main:app
 if __name__ != '__main__':
-    pass 
+    # Gunicorn calls this 'app' variable to start the web server
+    # The start_bot_daemon() call is scheduled by the first incoming request
+    pass
 
 if __name__ == '__main__':
     # This block is for local running/debugging only
-    print("Application is configured to run using Webhook on Render.")
+    print("Application is configured to run using Daemon Thread on Render.")
