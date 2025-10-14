@@ -1,6 +1,8 @@
-# database.py - PostgreSQL Implementation using asyncpg
+# database.py - PostgreSQL Implementation (Final Executable Version)
+import asyncio
 import asyncpg
-from config import DATABASE_URL 
+import os
+from config import DATABASE_URL # Imports the URL set in Render
 
 # --- Key Functions ---
 
@@ -17,6 +19,7 @@ async def initialize_db():
                 sold BOOLEAN NOT NULL DEFAULT FALSE
             )
         ''')
+        print("PostgreSQL Database table created successfully.")
     finally:
         await conn.close()
 
@@ -44,11 +47,10 @@ async def get_available_countries(is_full_info: bool) -> list:
     finally:
         await conn.close()
 
-# The fulfillment function (retrieve key and mark sold) will be completed later.
-
 # --- Initial Data Population ---
 async def populate_initial_keys():
     """Populates the database with your starting inventory."""
+    # We call initialize_db here just to be safe, but it was done in main() below
     print("Populating initial keys...")
     await add_key("US_KEY_FULL_1", "US", True)
     await add_key("US_KEY_FULL_2", "US", True)
@@ -58,7 +60,17 @@ async def populate_initial_keys():
     await add_key("DE_KEY_NONFULL_6", "DE", False)
     print("Initial key population complete.")
 
+
+# --- EXECUTABLE BLOCK (NEW) ---
 if __name__ == '__main__':
-    # This section is for manual running after deployment
-    print("To run: Initialize and populate DB...")
-    # NOTE: You must set the DATABASE_URL environment variable locally to run this.
+    # This block executes the async functions when the file is run directly.
+    print("To run: Initializing and populating DB...")
+    
+    # Check for DATABASE_URL before running
+    if not os.getenv("DATABASE_URL"):
+        print("FATAL ERROR: DATABASE_URL environment variable is missing!")
+    else:
+        # 1. Run initialization (creates table)
+        asyncio.run(initialize_db()) 
+        # 2. Run population (inserts keys)
+        asyncio.run(populate_initial_keys())
