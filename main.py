@@ -7,7 +7,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Update
-from aiogram.methods import set_webhook, delete_webhook
+# REMOVED: from aiogram.methods import set_webhook, delete_webhook - We will import inside the function
 
 # --- Database and Config Imports ---
 from database import get_available_countries 
@@ -16,6 +16,9 @@ from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
 # --- Flask Integration ---
 from flask import Flask, request, Response 
 from typing import Dict, Any
+
+# Import the methods we need only as objects/classes
+from aiogram.methods import SetWebhook, DeleteWebhook # <-- CORRECTED IMPORT
 
 # Set up logging 
 logging.basicConfig(level=logging.INFO)
@@ -175,12 +178,12 @@ async def set_telegram_webhook():
     """Sets the bot's webhook URL and clears any conflicts."""
     full_webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
     
-    # 1. Ensure any old polling is cleared (just in case)
-    # This call failed previously, so we execute it in a safe, isolated loop.
-    await bot(delete_webhook(drop_pending_updates=True))
+    # 1. Clear any old polling or webhooks
+    # The fix is here: calling the imported class as a method on the bot instance.
+    await bot(DeleteWebhook(drop_pending_updates=True))
     
     # 2. Set the Webhook for production
-    await bot(set_webhook(url=full_webhook_url))
+    await bot(SetWebhook(url=full_webhook_url))
     logging.info(f"Telegram Webhook set to: {full_webhook_url}")
 
 # @app.before_request /removed/
