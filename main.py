@@ -35,13 +35,13 @@ WEBHOOK_PATH = "/telegram"
 BASE_WEBHOOK_URL = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}" 
 
 
-# --- 2. FSM and KEYBOARDS (All unchanged) ---
+# --- 2. FINITE STATE MACHINE (FSM) ---
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_country = State()
     waiting_for_quantity = State()
 
-# --- All keyboard generation functions go here (Unchanged) ---
+# --- 3. KEYBOARD GENERATION ---
 def get_key_type_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Full Info 📝", callback_data="type_select:1")],
@@ -69,10 +69,9 @@ def get_country_keyboard(countries: list, key_type: str):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-# --- 4. HANDLERS (The Conversation Flow - Unchanged) ---
-dp.include_router(router) # Include router for processing updates
+# --- 4. HANDLERS (The Conversation Flow) ---
+dp.include_router(router)
 
-# --- Start Handler (Unchanged) ---
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
@@ -83,7 +82,6 @@ async def start_handler(message: Message, state: FSMContext):
     )
     await message.answer(welcome_text, reply_markup=get_key_type_keyboard(), parse_mode='Markdown')
 
-# --- Type Selection Handler (Unchanged) ---
 @router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
 @router.callback_query(F.data == "back_to_type") 
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
@@ -123,7 +121,6 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# --- COUNTRY SELECTION Handler (Unchanged) ---
 @router.callback_query(PurchaseState.waiting_for_country, F.data.startswith("country_select"))
 @router.callback_query(F.data == "back_to_country")
 async def handle_country_selection(callback: CallbackQuery, state: FSMContext):
@@ -146,7 +143,6 @@ async def handle_country_selection(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# --- QUANTITY SELECTION Handler (Unchanged) ---
 @router.callback_query(PurchaseState.waiting_for_quantity, F.data.startswith("qty_select"))
 async def handle_quantity_selection(callback: CallbackQuery, state: FSMContext):
     _, quantity_str = callback.data.split(":")
@@ -188,8 +184,8 @@ async def set_telegram_webhook():
 @app.before_request
 def setup_bot_before_first_request():
     """
-    FIXED: We run the setup synchronously in a dedicated loop 
-    to prevent the 'Event loop is closed' crash.
+    Runs the webhook setup synchronously on the first request.
+    This resolves the conflict between Flask and the asyncio loop.
     """
     if not hasattr(app, 'webhook_setup_complete'):
         try:
@@ -235,19 +231,3 @@ app = WsgiToAsgi(wsgi_app)
 
 if __name__ == '__main__':
     print("Application is configured to run using Webhook on Render.")
-```
-
-#### **Final Action Plan**
-
-1.  **Save `main.py`** with the new adapter code.
-2.  **Update `requirements.txt`:** Add `asgiref`.
-3.  **Update Start Command:** Change the Start Command on Render to:
-    ```
-    uvicorn main:app --host 0.0.0.0 --port $PORT
-    ```
-4.  **Commit and Push:**
-    ```bash
-    git add .
-    git commit -m "FINAL_ASGI_ADAPTER_FIX: Using WsgiToAsgi and uvicorn for maximum stability"
-    git push origin main
-    
