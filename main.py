@@ -1,8 +1,9 @@
-# main.py - FINAL PRODUCTION CODE (Switching from Polling to Webhook)
+# main.py - FINAL PRODUCTION CODE (Webhook Version)
 
 import asyncio
 import os
 import logging
+import json
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -18,7 +19,11 @@ from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
 from flask import Flask, request, Response 
 from typing import Dict, Any
 
+# Set up logging for easier debugging in Render logs
+logging.basicConfig(level=logging.INFO)
+
 # --- 1. SETUP ---
+# NOTE: Keys are read securely from Render Environment Variables
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
@@ -27,6 +32,7 @@ app = Flask(__name__)
 # --- Webhook Constants ---
 # Render provides the hostname, we set the path
 WEBHOOK_PATH = "/telegram" 
+# RENDER_EXTERNAL_HOSTNAME is set automatically by Render
 BASE_WEBHOOK_URL = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}" 
 
 
@@ -36,7 +42,7 @@ class PurchaseState(StatesGroup):
     waiting_for_country = State()
     waiting_for_quantity = State()
 
-# --- 3. KEYBOARD GENERATION (Remains the same) ---
+# --- 3. KEYBOARD GENERATION ---
 def get_key_type_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Full Info 📝", callback_data="type_select:1")],
@@ -65,11 +71,14 @@ def get_country_keyboard(countries: list, key_type: str):
 
 
 # --- 4. HANDLERS (The Conversation Flow) ---
-dp.include_router(router) # Include router here for processing updates
+dp.include_router(router) # Include router for processing updates
 
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
+    # Clear state and set the initial state
+    await state.clear()
     await state.set_state(PurchaseState.waiting_for_type)
+    
     welcome_text = (
         "**Welcome to the Rockershop Forum!** 🌍\n\n"
         "Please select the type of key you are interested in."
@@ -91,6 +100,7 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         await state.set_state(PurchaseState.waiting_for_country)
 
     try:
+        # CRITICAL: This pulls the list of countries from the LIVE PostgreSQL DB
         countries = await get_available_countries(is_full_info)
     except Exception as e:
         countries = []
@@ -172,19 +182,27 @@ def index():
     return "Telegram Bot Webhook is Active."
 
 @app.route(WEBHOOK_PATH, methods=["POST"])
-def telegram_webhook():
-    """Receives updates from Telegram and hands them to Aiogram."""
+async def telegram_webhook():
+    """
+    Receives updates from Telegram and hands them to Aiogram.
+    Made async to prevent Gunicorn workers from hanging.
+    """
     try:
-        update_data = request.get_json()
+        # Get the JSON data from Telegram
+        # We must use request.get_json(silent=True) to avoid Flask internal errors 
+        # if the request body is empty or malformed (Telegram sometimes sends garbage).
+        update_data: Dict[str, Any] = request.get_json(silent=True)
         if not update_data:
-            return Response(status=400)
+            logging.warning("Received empty or malformed update body.")
+            return Response(status=200) # Send 200 OK anyway to satisfy Telegram
 
-        # Process the update asynchronously without blocking Gunicorn
-        asyncio.ensure_future(dp.feed_update(bot, Update(**update_data)))
+        # Process the update using the Dispatcher
+        await dp.feed_update(bot, Update(**update_data))
         
     except Exception as e:
-        logging.error(f"Webhook processing error: {e}")
-    
+        # Log the exception explicitly to the Render logs but do NOT fail the response
+        logging.exception(f"CRITICAL WEBHOOK PROCESSING ERROR: {e}") 
+        
     # Always return 200 OK immediately to Telegram to prevent retries
     return Response(status=200)
 
@@ -205,20 +223,18 @@ async def set_telegram_webhook():
 def start_webhook_setup():
     """
     Called by Flask/Gunicorn on the first request to ensure the webhook is set.
-    Uses @app.before_request for compatibility with modern Flask.
     """
     if not hasattr(app, 'webhook_set'):
+        # Use asyncio.ensure_future to run the async task without blocking the web server thread
         asyncio.ensure_future(set_telegram_webhook())
         app.webhook_set = True
         logging.info("Webhook setup scheduled.")
-    
-    # Optional: Run initialization and population on startup (Safer way is via shell)
-    # asyncio.ensure_future(initialize_db()) 
 
 
 # This is the final WSGI callable that Gunicorn imports and runs: gunicorn main:app
+# Gunicorn looks for the 'app' variable, which is our Flask instance.
 if __name__ != '__main__':
-    pass # Gunicorn starts the app via the 'app' variable
+    pass 
 
 if __name__ == '__main__':
     # This block is for local running/debugging only
