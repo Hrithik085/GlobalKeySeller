@@ -1,6 +1,5 @@
-aiogram
-asyncpg
-Flask[async]
-gunicorn[gevent]  # This is the key change!
-uvicorn    
-asgiref
+aiogram==3.2.2
+asyncpg==0.30.0
+fastapi==0.111.0
+uvicorn==0.29.0
+python-dotenv==1.0.1
