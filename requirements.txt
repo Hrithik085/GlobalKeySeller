@@ -1,5 +1,4 @@
 aiogram
 asyncpg
 Flask[async]
-gunicorn 
 uvicorn
