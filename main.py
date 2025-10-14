@@ -176,30 +176,14 @@ async def set_telegram_webhook():
     full_webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
     
     # 1. Ensure any old polling is cleared (just in case)
+    # This call failed previously, so we execute it in a safe, isolated loop.
     await bot(delete_webhook(drop_pending_updates=True))
     
     # 2. Set the Webhook for production
     await bot(set_webhook(url=full_webhook_url))
     logging.info(f"Telegram Webhook set to: {full_webhook_url}")
 
-@app.before_request
-def setup_bot_before_first_request():
-    """
-    Called by Flask/Gunicorn on the first request to ensure the webhook is set.
-    """
-    if not hasattr(app, 'webhook_setup_complete'):
-        # We need a dedicated loop for this initial async setup
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(set_telegram_webhook())
-            loop.close()
-            app.webhook_setup_complete = True
-            logging.info("Webhook setup routine finished.")
-        except Exception as e:
-            logging.critical(f"FATAL: Webhook setup crashed during startup: {e}")
-            # If the setup crashes, the bot will remain unresponsive.
-
+# @app.before_request /removed/
 
 @app.route('/', methods=['GET'])
 def index():
@@ -224,6 +208,22 @@ async def telegram_webhook():
         
     # Must return 200 OK immediately
     return Response(status=200)
+
+
+# --- 6. STARTUP/INITIALIZATION (NEW SAFE BLOCK) ---
+
+# Run the webhook setup once, completely separate from the Gunicorn loop.
+# This prevents the Gunicorn worker from crashing on startup.
+# We run this check only once, ensuring the Webhook is set immediately.
+try:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    # Run the setup synchronously (blocking until set)
+    loop.run_until_complete(set_telegram_webhook())
+    loop.close()
+    logging.info("Initial Webhook setup complete (outside Gunicorn loop).")
+except Exception as e:
+    logging.critical(f"FATAL: Webhook setup failed: {e}") 
 
 
 # The WSGI callable: gunicorn main:app (Gunicorn imports the 'app' variable)
