@@ -7,7 +7,8 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Update
-# REMOVED: from aiogram.methods import set_webhook, delete_webhook - We will import inside the function
+from aiogram.methods import SetWebhook, DeleteWebhook
+from asgiref.wsgi import WsgiToAsgi # <-- NEW ADAPTER IMPORT
 
 # --- Database and Config Imports ---
 from database import get_available_countries 
@@ -18,7 +19,7 @@ from flask import Flask, request, Response
 from typing import Dict, Any
 
 # Import the methods we need only as objects/classes
-from aiogram.methods import SetWebhook, DeleteWebhook # <-- CORRECTED IMPORT
+from aiogram.methods import SetWebhook, DeleteWebhook 
 
 # Set up logging 
 logging.basicConfig(level=logging.INFO)
@@ -31,7 +32,6 @@ app = Flask(__name__)
 
 # --- Webhook Constants ---
 WEBHOOK_PATH = "/telegram" 
-# Use RENDER_EXTERNAL_HOSTNAME to get the base URL
 BASE_WEBHOOK_URL = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}" 
 
 
@@ -171,7 +171,7 @@ async def handle_quantity_selection(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# --- 5. WEBHOOK/GUNICORN INTEGRATION (Production Webhook Mode) ---
+# --- 5. WEBHOOK/UVICORN INTEGRATION (Production Webhook Mode) ---
 
 # --- Asynchronous Telegram Setup Hook ---
 async def set_telegram_webhook():
@@ -179,14 +179,29 @@ async def set_telegram_webhook():
     full_webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
     
     # 1. Clear any old polling or webhooks
-    # The fix is here: calling the imported class as a method on the bot instance.
     await bot(DeleteWebhook(drop_pending_updates=True))
     
     # 2. Set the Webhook for production
     await bot(SetWebhook(url=full_webhook_url))
     logging.info(f"Telegram Webhook set to: {full_webhook_url}")
 
-# @app.before_request /removed/
+@app.before_request
+def setup_bot_before_first_request():
+    """
+    FIXED: We run the setup synchronously in a dedicated loop 
+    to prevent the 'Event loop is closed' crash.
+    """
+    if not hasattr(app, 'webhook_setup_complete'):
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(set_telegram_webhook())
+            loop.close()
+            app.webhook_setup_complete = True
+            logging.info("Initial Webhook setup complete.")
+        except Exception as e:
+            logging.critical(f"FATAL: Webhook setup failed: {e}") 
+
 
 @app.route('/', methods=['GET'])
 def index():
@@ -197,41 +212,42 @@ def index():
 async def telegram_webhook():
     """
     The main production endpoint for receiving updates from Telegram.
-    Must be an ASYNC function for efficiency.
+    This function is ASYNC and Uvicorn will execute it correctly.
     """
     try:
-        update_data: Dict[str, Any] = request.get_json(silent=True)
+        update_data: Dict[str, Any] = await request.get_json(silent=True)
         if update_data:
-            # Safely process the update in the Aiogram dispatcher
             await dp.feed_update(bot, Update(**update_data))
         
     except Exception as e:
-        # Log any crash inside the handler logic
         logging.exception(f"CRITICAL WEBHOOK PROCESSING ERROR: {e}") 
         
-    # Must return 200 OK immediately
     return Response(status=200)
 
+# --- 6. WSGI-to-ASGI ADAPTER ENTRY POINT ---
 
-# --- 6. STARTUP/INITIALIZATION (NEW SAFE BLOCK) ---
+# The WSGI Flask application instance
+wsgi_app = app
 
-# Run the webhook setup once, completely separate from the Gunicorn loop.
-# This prevents the Gunicorn worker from crashing on startup.
-# We run this check only once, ensuring the Webhook is set immediately.
-try:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    # Run the setup synchronously (blocking until set)
-    loop.run_until_complete(set_telegram_webhook())
-    loop.close()
-    logging.info("Initial Webhook setup complete (outside Gunicorn loop).")
-except Exception as e:
-    logging.critical(f"FATAL: Webhook setup failed: {e}") 
+# The ASGI-wrapped application (This is what Uvicorn runs)
+app = WsgiToAsgi(wsgi_app) 
 
-
-# The WSGI callable: gunicorn main:app (Gunicorn imports the 'app' variable)
-if __name__ != '__main__':
-    pass 
 
 if __name__ == '__main__':
     print("Application is configured to run using Webhook on Render.")
+```
+
+#### **Final Action Plan**
+
+1.  **Save `main.py`** with the new adapter code.
+2.  **Update `requirements.txt`:** Add `asgiref`.
+3.  **Update Start Command:** Change the Start Command on Render to:
+    ```
+    uvicorn main:app --host 0.0.0.0 --port $PORT
+    ```
+4.  **Commit and Push:**
+    ```bash
+    git add .
+    git commit -m "FINAL_ASGI_ADAPTER_FIX: Using WsgiToAsgi and uvicorn for maximum stability"
+    git push origin main
+    
