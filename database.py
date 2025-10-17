@@ -1,12 +1,8 @@
-# database.py
 import os
-import asyncio
 from typing import List, Optional
-
+import asyncio
 import asyncpg
 import ssl
-
-# Read the full DATABASE_URL DSN string from config or env (keeps same format)
 from config import DATABASE_URL
 
 _pool: Optional[asyncpg.Pool] = None
@@ -14,24 +10,19 @@ _pool: Optional[asyncpg.Pool] = None
 def build_ssl_context() -> Optional[ssl.SSLContext]:
     """
     Build an SSLContext to pass to asyncpg.create_pool.
-    If DB_SSL_NO_VERIFY is set to "1", "true", or "yes" (case-insensitive),
-    the context will disable verification (useful for self-signed certs in dev).
-    If not set, returns None (let asyncpg use default behavior).
+    Disables certificate verification if the DB_SSL_NO_VERIFY environment variable is set.
     """
-    no_verify = os.getenv("DB_SSL_NO_VERIFY", "true").lower()  # default to true for Render dev
+    # Default to true for development environment like Render internal network
+    no_verify = os.getenv("DB_SSL_NO_VERIFY", "true").lower()
     if no_verify in ("1", "true", "yes"):
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
-    # Return None to use default verification (recommended for production)
     return None
 
 async def get_pool() -> asyncpg.Pool:
-    """
-    Return a global asyncpg pool.
-    Uses the DATABASE_URL DSN directly (no parsing) and passes ssl context via `ssl=...`.
-    """
+    """Return a global asyncpg pool."""
     global _pool
     if _pool is None:
         if not DATABASE_URL:
@@ -39,8 +30,6 @@ async def get_pool() -> asyncpg.Pool:
 
         ssl_ctx = build_ssl_context()
 
-        # asyncpg.create_pool accepts DSN/URL as first positional arg (or dsn=...)
-        # We pass the DSN directly so your connection format remains the same.
         _pool = await asyncpg.create_pool(
             dsn=DATABASE_URL,
             ssl=ssl_ctx,
@@ -120,12 +109,10 @@ async def main_setup():
 if __name__ == '__main__':
     try:
         asyncio.run(main_setup())
-except RuntimeError as e:
+    except RuntimeError as e:
         if "DATABASE_URL" in str(e):
             print("FATAL ERROR: DATABASE_URL environment variable is required.")
         else:
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
-        # This line was the source of the SyntaxError: unterminated f-string
         print(f"An unexpected error occurred: {e}")
-
