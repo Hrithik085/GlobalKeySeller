@@ -1,9 +1,9 @@
 import asyncio
 import os
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Generator # <-- FIX: Use Generator as return type hint for lifespan
 from multiprocessing import current_process
-from contextlib import asynccontextmanager # <-- FIX: ADDED MISSING IMPORT
+from contextlib import asynccontextmanager 
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -181,7 +181,7 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
 
 # --- Lifespan Manager (The FINAL Startup Fix) ---
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[Dict[str, Any], None]:
+async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]: # <-- CORRECTED HINT
     """Initializes DB and sets Webhook once before the workers boot."""
     logger.info("--- STARTING APPLICATION LIFESPAN ---")
     
@@ -247,3 +247,5 @@ async def telegram_webhook(request: Request):
 @app.get("/")
 def health_check():
     return Response(status_code=200, content="✅ Telegram Bot is up and running via FastAPI.")
+
+    
