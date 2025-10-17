@@ -1,4 +1,3 @@
-# database.py - PostgreSQL Implementation (Final Executable Version)
 import asyncio
 import asyncpg
 import os
@@ -11,11 +10,14 @@ async def initialize_db():
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         await conn.execute('''
-            CREATE TABLE IF NOT EXISTS keys (
+            CREATE TABLE IF NOT EXISTS card_inventory (
                 id SERIAL PRIMARY KEY,
-                key_detail TEXT NOT NULL,
-                country_code TEXT NOT NULL,
-                is_full_info BOOLEAN NOT NULL,
+                # Key details for delivery (CVV, etc.)
+                key_detail TEXT NOT NULL, 
+                # BIN is the first 6 digits of the card
+                bin_header TEXT NOT NULL,
+                # Flag to denote the type (Full Info/Info-less)
+                is_full_info BOOLEAN NOT NULL, 
                 sold BOOLEAN NOT NULL DEFAULT FALSE
             )
         ''')
@@ -23,54 +25,53 @@ async def initialize_db():
     finally:
         await conn.close()
 
-async def add_key(key_detail, country_code, is_full_info):
-    """Adds a single key to the database (for initial population)."""
+async def add_key(key_detail, bin_header, is_full_info):
+    """Adds a single key/card to the inventory (for initial population)."""
     conn = await asyncpg.connect(DATABASE_URL)
     try:
+        # NOTE: We use card_inventory as the table name now.
         await conn.execute('''
-            INSERT INTO keys (key_detail, country_code, is_full_info)
+            INSERT INTO card_inventory (key_detail, bin_header, is_full_info)
             VALUES ($1, $2, $3)
-        ''', key_detail, country_code, is_full_info)
+        ''', key_detail, bin_header, is_full_info)
     finally:
         await conn.close()
 
-async def get_available_countries(is_full_info: bool) -> list:
-    """Gets a list of countries with UNSOLD keys for a given type."""
+async def find_available_bins(is_full_info: bool) -> list:
+    """Gets a list of distinct BINs that have UNSOLD cards for a given type."""
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         results = await conn.fetch('''
-            SELECT DISTINCT country_code 
-            FROM keys 
+            SELECT DISTINCT bin_header 
+            FROM card_inventory 
             WHERE is_full_info = $1 AND sold = FALSE
         ''', is_full_info)
-        return [row['country_code'] for row in results]
+        # Returns a list of available BIN headers (e.g., ['456456', '543210'])
+        return [row['bin_header'] for row in results]
     finally:
         await conn.close()
 
 # --- Initial Data Population ---
 async def populate_initial_keys():
-    """Populates the database with your starting inventory."""
-    # We call initialize_db here just to be safe, but it was done in main() below
-    print("Populating initial keys...")
-    await add_key("US_KEY_FULL_1", "US", True)
-    await add_key("US_KEY_FULL_2", "US", True)
-    await add_key("US_KEY_NONFULL_3", "US", False)
-    await add_key("CA_KEY_FULL_4", "CA", True)
-    await add_key("DE_KEY_NONFULL_5", "DE", False)
-    await add_key("DE_KEY_NONFULL_6", "DE", False)
-    print("Initial key population complete.")
+    """Populates the database with sample BINs for testing."""
+    print("Populating initial card inventory...")
+    # Sample Full Info Cards (is_full_info=True)
+    await add_key("456456xxxxxxxxxx|09/27|123|John Doe|NY", "456456", True)
+    await add_key("456456xxxxxxxxxx|08/26|456|Jane Doe|CA", "456456", True)
+    
+    # Sample Info-less Cards (is_full_info=False)
+    await add_key("543210xxxxxxxxxx|12/25|789", "543210", False)
+    await add_key("543210xxxxxxxxxx|11/24|012", "543210", False)
+    print("Initial card inventory population complete.")
 
 
-# --- EXECUTABLE BLOCK (NEW) ---
+# --- EXECUTABLE BLOCK ---
 if __name__ == '__main__':
     # This block executes the async functions when the file is run directly.
     print("To run: Initializing and populating DB...")
     
-    # Check for DATABASE_URL before running
     if not os.getenv("DATABASE_URL"):
         print("FATAL ERROR: DATABASE_URL environment variable is missing!")
     else:
-        # 1. Run initialization (creates table)
         asyncio.run(initialize_db()) 
-        # 2. Run population (inserts keys)
         asyncio.run(populate_initial_keys())
