@@ -73,8 +73,18 @@ async def start_handler(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(PurchaseState.waiting_for_type)
     welcome_text = (
-        "**Welcome to the Rockershop Forum!** 🌍\n\n"
-        "Please select the type of key you are interested in."
+        "🌟 **Welcome to Rockers CVV Shop!** 💳\n\n"
+        "We offer high-quality CVVs:\n"
+        "  • Info-less CVVs\n"
+        "  • Full Info CVVs\n\n"
+        "💎 **Features:**\n"
+        "  • 24/7 Service\n"
+        "  • Instant Delivery\n"
+        "  • Secure Transactions\n\n"
+        "💰 Deposit to start shopping\n"
+        "📊 Track all your transactions\n\n"
+        "🔐 Your security is our top priority\n\n"
+        "**Please choose your product type below:**"
     )
     await message.answer(welcome_text, reply_markup=get_key_type_keyboard(), parse_mode='Markdown')
 
