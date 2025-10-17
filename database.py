@@ -120,10 +120,12 @@ async def main_setup():
 if __name__ == '__main__':
     try:
         asyncio.run(main_setup())
-    except RuntimeError as e:
+except RuntimeError as e:
         if "DATABASE_URL" in str(e):
             print("FATAL ERROR: DATABASE_URL environment variable is required.")
         else:
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
-        print(f"An unex
+        # This line was the source of the SyntaxError: unterminated f-string
+        print(f"An unexpected error occurred: {e}")
+
