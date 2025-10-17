@@ -1,77 +1,66 @@
-import asyncio
-import asyncpg
+# db.py
 import os
-from config import DATABASE_URL # Imports the URL set in Render
+import asyncpg
+import asyncio
+from typing import List, Optional
 
-# --- Key Functions ---
+DATABASE_URL = os.getenv("DATABASE_URL")  # e.g. postgres://user:pass@host:5432/dbname
+
+_pool: Optional[asyncpg.Pool] = None
+
+async def get_pool() -> asyncpg.Pool:
+    global _pool
+    if _pool is None:
+        if not DATABASE_URL:
+            raise RuntimeError("DATABASE_URL environment variable is required")
+        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    return _pool
 
 async def initialize_db():
-    """Connects and creates the 'keys' table if it doesn't exist."""
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        await conn.execute('''
+    """Initialize pool and create table if it doesn't exist."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS card_inventory (
                 id SERIAL PRIMARY KEY,
-                # Key details for delivery (CVV, etc.)
-                key_detail TEXT NOT NULL, 
-                # BIN is the first 6 digits of the card
-                bin_header TEXT NOT NULL,
-                # Flag to denote the type (Full Info/Info-less)
-                is_full_info BOOLEAN NOT NULL, 
+                key_detail TEXT NOT NULL,
+                key_header TEXT NOT NULL,
+                is_full_info BOOLEAN NOT NULL,
                 sold BOOLEAN NOT NULL DEFAULT FALSE
             )
-        ''')
-        print("PostgreSQL Database table created successfully.")
-    finally:
-        await conn.close()
+        """)
 
-async def add_key(key_detail, bin_header, is_full_info):
-    """Adds a single key/card to the inventory (for initial population)."""
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        # NOTE: We use card_inventory as the table name now.
-        await conn.execute('''
-            INSERT INTO card_inventory (key_detail, bin_header, is_full_info)
-            VALUES ($1, $2, $3)
-        ''', key_detail, bin_header, is_full_info)
-    finally:
-        await conn.close()
+async def add_key(key_detail: str, key_header: str, is_full_info: bool):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO card_inventory (key_detail, key_header, is_full_info) VALUES ($1, $2, $3)",
+            key_detail, key_header, is_full_info
+        )
 
-async def find_available_bins(is_full_info: bool) -> list:
-    """Gets a list of distinct BINs that have UNSOLD cards for a given type."""
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        results = await conn.fetch('''
-            SELECT DISTINCT bin_header 
-            FROM card_inventory 
-            WHERE is_full_info = $1 AND sold = FALSE
-        ''', is_full_info)
-        # Returns a list of available BIN headers (e.g., ['456456', '543210'])
-        return [row['bin_header'] for row in results]
-    finally:
-        await conn.close()
+async def find_available_bins(is_full_info: bool) -> List[str]:
+    """Returns distinct key_header values for unsold cards of the given type."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT key_header FROM card_inventory WHERE is_full_info = $1 AND sold = FALSE",
+            is_full_info
+        )
+        return [r["key_header"] for r in rows]
 
-# --- Initial Data Population ---
 async def populate_initial_keys():
-    """Populates the database with sample BINs for testing."""
-    print("Populating initial card inventory...")
-    # Sample Full Info Cards (is_full_info=True)
-    await add_key("456456xxxxxxxxxx|09/27|123|John Doe|NY", "456456", True)
-    await add_key("456456xxxxxxxxxx|08/26|456|Jane Doe|CA", "456456", True)
-    
-    # Sample Info-less Cards (is_full_info=False)
-    await add_key("543210xxxxxxxxxx|12/25|789", "543210", False)
-    await add_key("543210xxxxxxxxxx|11/24|012", "543210", False)
-    print("Initial card inventory population complete.")
-
-
-# --- EXECUTABLE BLOCK ---
-if __name__ == '__main__':
-    # This block executes the async functions when the file is run directly.
-    print("To run: Initializing and populating DB...")
-    
-    if not os.getenv("DATABASE_URL"):
-        print("FATAL ERROR: DATABASE_URL environment variable is missing!")
-    else:
-        asyncio.run(initialize_db()) 
-        asyncio.run(populate_initial_keys())
+    """Optional helper to seed sample values (call from startup if desired)."""
+    # Avoid duplicate seeding in production; check first if needed.
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # check existing
+        count = await conn.fetchval("SELECT COUNT(*) FROM card_inventory")
+        if count == 0:
+            await conn.execute(
+                "INSERT INTO card_inventory (key_detail, key_header, is_full_info) VALUES ($1, $2, $3)",
+                "456456|link|Jane Doe|CA", "456456", True
+            )
+            await conn.execute(
+                "INSERT INTO card_inventory (key_detail, key_header, is_full_info) VALUES ($1, $2, $3)",
+                "543210", "543210", False
+            )

@@ -1,6 +1,6 @@
 aiogram
 asyncpg
 fastapi
-uvicorn
+uvicorn[standard]
 python-dotenv
-Flask
+asgiref
