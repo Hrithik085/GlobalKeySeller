@@ -1,21 +1,24 @@
-# main.py
 import os
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List
+import asyncio
 
-from fastapi import FastAPI, Request, Response
-from fastapi import HTTPException
+from fastapi import FastAPI, Request
+from starlette.responses import Response
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, CallbackQuery, Update, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from aiogram.client.default import DefaultBotProperties  # ✅ NEW IMPORT
+from aiogram.client.default import DefaultBotProperties  
+from aiogram.methods import SetWebhook, DeleteWebhook 
 
-from config import BOT_TOKEN, BASE_WEBHOOK_URL, WEBHOOK_PATH, CURRENCY, KEY_PRICE_USD
+# --- Database and Config ---
+from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
 from database import initialize_db, populate_initial_keys, find_available_bins, get_pool
 
+# --- Logging ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -23,7 +26,6 @@ if not BOT_TOKEN:
     logger.critical("BOT_TOKEN missing in environment. Set BOT_TOKEN and redeploy.")
     raise RuntimeError("BOT_TOKEN environment variable is required")
 
-# ✅ FIXED: use DefaultBotProperties instead of deprecated parse_mode param
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode="Markdown")
@@ -34,6 +36,12 @@ router = Router()
 dp.include_router(router)
 
 app = FastAPI(title="Telegram Bot Webhook (FastAPI + aiogram)")
+
+# Webhook Constants
+WEBHOOK_PATH = "/telegram"
+BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}")
+FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
+
 
 # FSM States
 class PurchaseState(StatesGroup):
@@ -80,13 +88,21 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         await state.set_state(PurchaseState.waiting_for_command)
 
     key_type_label = "Full Info" if is_full_info else "Info-less"
+    
+    # NEW LOGIC: We don't check country count, we just show the guide and list available BINs
+    try:
+        available_bins = await find_available_bins(is_full_info)
+    except Exception:
+        available_bins = []
+        logger.exception("Failed to fetch available BINs during menu load.")
+
     command_guide = (
         f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
         f"**`get_card_by_header:<BIN> <Quantity>`**\n\n"
         f"✨ Example for buying 10 Keys:\n"
         f"**`get_card_by_header:456456 10`**\n\n"
-        f"🔄 The system will generate Keys based on your provided BIN."
+        f"Available BINs in stock: {', '.join(available_bins) if available_bins else 'None'}"
     )
 
     await callback.message.edit_text(
@@ -100,20 +116,18 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
 @router.message(PurchaseState.waiting_for_command, F.text.startswith("get_card_by_header:"))
 async def handle_card_purchase_command(message: Message, state: FSMContext):
     try:
+        # Command parsing logic
         parts = message.text.split(":", 1)
-        if len(parts) < 2 or not parts[1].strip():
-            raise ValueError("Malformed command")
-
         command_args = parts[1].strip().split()
+        
         key_header = command_args[0]
-        if len(command_args) < 2:
-            raise ValueError("Quantity missing")
         quantity = int(command_args[1])
 
         data = await state.get_data()
         is_full_info = data.get('is_full_info', False)
         key_type_label = "Full Info" if is_full_info else "Info-less"
 
+        # BIN availability check
         available_bins = await find_available_bins(is_full_info)
         if key_header not in available_bins:
             await message.answer(
@@ -145,22 +159,8 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         logger.exception("Purchase command failed")
         await message.answer("❌ An unexpected error occurred. Please try again later.")
 
-# Webhook endpoint
-@app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request):
-    try:
-        update_data = await request.json()
-    except Exception:
-        logger.exception("Failed to parse JSON from Telegram")
-        raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    try:
-        await dp.feed_update(bot, Update(**update_data))
-    except Exception:
-        logger.exception("Failed to process update")
-    return Response(status_code=200)
-
-# Startup & Shutdown
+# --- Webhook Setup ---
 @app.on_event("startup")
 async def on_startup():
     await initialize_db()
@@ -170,27 +170,29 @@ async def on_startup():
         full_webhook = BASE_WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
         logger.info("Setting webhook to: %s", full_webhook)
         try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            await bot.set_webhook(full_webhook)
+            await bot(DeleteWebhook(drop_pending_updates=True))
+            await bot(SetWebhook(url=full_webhook))
         except Exception:
             logger.exception("Failed to set webhook")
     else:
         logger.warning("BASE_WEBHOOK_URL not set; bot will not set webhook automatically.")
 
-@app.on_event("shutdown")
-async def on_shutdown():
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
     try:
-        await bot.delete_webhook(drop_pending_updates=True)
+        # We rely on the ASGI server (Uvicorn) to correctly parse the JSON body
+        update_data: Dict[str, Any] = await request.json()
     except Exception:
-        logger.exception("Failed to delete webhook on shutdown")
+        logger.exception("Failed to parse JSON from Telegram")
+        return Response(status_code=400) # Bad Request
 
     try:
-        await bot.session.close()
+        # Feed the update to the Aiogram dispatcher
+        await dp.feed_update(bot, Update(**update_data))
     except Exception:
-        logger.exception("Failed to close bot session")
+        logger.exception("Failed to process update")
+    return Response(status_code=200)
 
-    try:
-        pool = await get_pool()
-        await pool.close()
-    except Exception:
-        pass  # ignore uninitialized pool
+@app.get("/")
+def health_check():
+    return "✅ Telegram Bot is up and running via FastAPI."
