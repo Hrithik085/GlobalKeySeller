@@ -15,19 +15,20 @@ async def get_pool() -> asyncpg.Pool:
         if not DATABASE_URL:
             raise RuntimeError("DATABASE_URL environment variable is required")
 
-        # --- CRITICAL SSL FIX ---
-        conn_string = f"{DATABASE_URL}?ssl=true" if 'ssl=' not in DATABASE_URL else DATABASE_URL
+        # --- CRITICAL FIX: USE URL DIRECTLY ---
+        # The connection string (DATABASE_URL) must be used AS IS.
+        # We assume Render has configured the SSL parameters correctly.
+        conn_string = DATABASE_URL
 
         # Optimization: Use a smaller pool size for a single-service application
         _pool = await asyncpg.create_pool(conn_string, min_size=1, max_size=4)
     return _pool
 
-# --- Database Schema Functions (Using Pool) ---
+# --- Database Schema Functions (Unchanged) ---
 
 async def initialize_db():
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # Create table if not exists
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS card_inventory (
                 id SERIAL PRIMARY KEY,
@@ -49,7 +50,6 @@ async def add_key(key_detail: str, key_header: str, is_full_info: bool):
         )
 
 async def find_available_bins(is_full_info: bool) -> List[str]:
-    """Return distinct key_header values for unsold cards of the given type."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -61,47 +61,33 @@ async def find_available_bins(is_full_info: bool) -> List[str]:
 # --- Population Logic (Uses Pool) ---
 
 async def populate_initial_keys():
-    """Populates the database with your starting inventory."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # Check if the table is empty before inserting data
         count = await conn.fetchval("SELECT COUNT(*) FROM card_inventory")
 
         if count == 0:
             print("Populating initial card inventory...")
-            # Sample Full Info Cards (is_full_info=True)
             await add_key("456456xxxxxxxxxx|09/27|123|John Doe|NY", "456456", True)
             await add_key("456456xxxxxxxxxx|08/26|456|Jane Doe|CA", "456456", True)
-
-            # Sample Info-less Cards (is_full_info=False)
             await add_key("543210xxxxxxxxxx|12/25|789", "543210", False)
             await add_key("543210xxxxxxxxxx|11/24|012", "543210", False)
             print("Initial card inventory population complete.")
         else:
             print("Inventory already populated. Skipping insertion.")
 
-# --- NEW WRAPPER FUNCTION ---
+# --- EXECUTABLE BLOCK ---
 async def main_setup():
-    """Wrapper to run both setup functions sequentially in one context."""
     print("To run: Initializing and populating DB...")
-
-    # 1. Run initialization (creates table)
     await initialize_db()
-    # 2. Run population (inserts keys)
     await populate_initial_keys()
 
-    # Optional: Close the global pool after running the script
     global _pool
     if _pool:
         await _pool.close()
 
-
-# --- EXECUTABLE BLOCK (CRITICAL FIX) ---
 if __name__ == '__main__':
     try:
-        # ONLY ONE asyncio.run() CALL!
         asyncio.run(main_setup())
-
     except RuntimeError as e:
         if "DATABASE_URL" in str(e):
             print("FATAL ERROR: DATABASE_URL environment variable is required.")
@@ -109,3 +95,4 @@ if __name__ == '__main__':
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
+
