@@ -1,9 +1,9 @@
 import asyncio
 import os
 import logging
-import threading 
 from typing import Dict, Any, List
 from multiprocessing import current_process
+from contextlib import asynccontextmanager # <-- FIX: ADDED MISSING IMPORT
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -37,11 +37,9 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-app = FastAPI(title="Telegram Bot Webhook (FastAPI + aiogram)") 
-
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
-BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://os.getenv('RENDER_EXTERNAL_HOSTNAME')")
+BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}")
 FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 
 
@@ -181,7 +179,7 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
 
 # --- 5. WEBHOOK/UVICORN INTEGRATION (Production Webhook Mode) ---
 
-# --- Lifespan Manager (Remains correct) ---
+# --- Lifespan Manager (The FINAL Startup Fix) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[Dict[str, Any], None]:
     """Initializes DB and sets Webhook once before the workers boot."""
@@ -189,11 +187,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[Dict[str, Any], None]:
     
     # 1. DATABASE SETUP (Initialization and Population)
     try:
+        # These database calls are safe now because the code uses pools and explicit SSL
         await initialize_db()
         await populate_initial_keys()
         logger.info("Database setup and population complete.")
     except Exception as e:
         logger.critical(f"FATAL DB ERROR: Cannot initialize resources: {e}")
+        # Raising SystemExit here prevents the application from booting crashed workers
         raise SystemExit(1)
     
     # 2. TELEGRAM WEBHOOK SETUP (Set only once)
