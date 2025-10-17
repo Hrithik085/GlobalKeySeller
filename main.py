@@ -17,7 +17,8 @@ from aiogram.methods import SetWebhook, DeleteWebhook
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool 
+# We import the required database functions, including the new check_stock_count
+from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count 
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -46,6 +47,7 @@ FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
+    waiting_for_confirmation = State() # NEW STATE
 
 def get_key_type_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -53,16 +55,17 @@ def get_key_type_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Info-less Keys", callback_data="type_select:0")]
     ])
 
-def get_quantity_keyboard() -> InlineKeyboardMarkup:
+def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardMarkup:
+    """Keyboard to confirm order or cancel after stock check."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 Key", callback_data="qty_select:1"),
-         InlineKeyboardButton(text="3 Keys", callback_data="qty_select:3")],
-        [InlineKeyboardButton(text="5 Keys", callback_data="qty_select:5")],
-        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_command")] 
+        # Placeholder for actual invoice button (to be implemented with NOWPayments)
+        [InlineKeyboardButton(text="✅ Confirm & Invoice", callback_data=f"confirm:{bin_header}:{quantity}")],
+        [InlineKeyboardButton(text="⬅️ Change Command", callback_data="back_to_type")]
     ])
 
 
-# --- Handlers ---
+# --- 4. HANDLERS (The Core Bot Logic) ---
+
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
@@ -85,6 +88,7 @@ async def start_handler(message: Message, state: FSMContext):
 # --- TYPE SELECTION (Shows Command Guide) ---
 @router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
 @router.callback_query(PurchaseState.waiting_for_command, F.data == "back_to_type") 
+@router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type") # FIX: Allow return from confirmation state
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     
     if callback.data == "back_to_type":
@@ -107,19 +111,16 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         available_bins = ["DB ERROR"]
         logger.exception("Failed to fetch available BINs during menu load.")
 
-    # --- UPDATED COMMAND GUIDE CONTENT (Copyable Block Fix) ---
+    # --- COMMAND GUIDE CONTENT (Copy Fix Applied) ---
     command_guide = (
         f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
-        
-        # This is the line the user needs to copy: put it inside triple backticks
-        f"```\nget_card_by_header:<BIN> <Quantity>\n```\n" 
-        
+        f"```\nget_card_by_header:<BIN> <Quantity>\n```\n"
         f"✨ Example for buying 10 Keys:\n"
         f"**`get_card_by_header:456456 10`**\n\n"
         f"Available BINs in stock: {', '.join(available_bins) if available_bins else 'None'}"
     )
-    # --- END UPDATED COMMAND GUIDE CONTENT ---
+    # --- END COMMAND GUIDE CONTENT ---
 
     await callback.message.edit_text(
         command_guide,
@@ -131,56 +132,98 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
 # --- End of handle_type_selection ---
 
 
-# --- Command Purchase Handler (Final Logic) ---
+# --- FINAL HANDLER: STOCK CHECK & INVOICE PROMPT ---
 @router.message(PurchaseState.waiting_for_command, F.text.startswith("get_card_by_header:"))
 async def handle_card_purchase_command(message: Message, state: FSMContext):
     try:
         parts = message.text.split(":", 1)
-        command_args = parts[1].strip().split()
         
-        key_header = command_args[0]
-        quantity = int(command_args[1])
+        # Validation and parsing
+        if len(parts) < 2 or not parts[1].strip():
+            raise ValueError("Malformed command")
 
+        command_args = parts[1].strip().split()
+        key_header = command_args[0]
+        
+        if len(command_args) < 2:
+            raise ValueError("Quantity missing")
+        
+        quantity = int(command_args[1])
+        
+        # State check
         data = await state.get_data()
         is_full_info = data.get('is_full_info', False)
         key_type_label = "Full Info" if is_full_info else "Info-less"
 
-        available_bins = await find_available_bins(is_full_info)
-        if key_header not in available_bins:
+        # 1. CHECK STOCK (Using the new function)
+        available_stock = await check_stock_count(key_header, is_full_info)
+
+        if available_stock < quantity:
+            # 1a. NOT ENOUGH STOCK: Prompt user to re-enter command (stay in waiting_for_command)
+            available_bins = await find_available_bins(is_full_info)
             await message.answer(
-                f"❌ No available keys found for BIN `{key_header}` (type: {key_type_label}).\n"
-                f"Available BINs for this type: {', '.join(available_bins) if available_bins else 'None'}"
+                f"⚠️ **Insufficient Stock!**\n"
+                f"We only have **{available_stock}** {key_type_label} keys for BIN `{key_header}`.\n\n"
+                f"Please re-enter your command with a lower quantity or choose another BIN:\n"
+                f"Available BINs: {', '.join(available_bins)}",
+                parse_mode='Markdown'
             )
             return
 
+        # 2. STOCK AVAILABLE: Store details and prompt for confirmation
         total_price = quantity * KEY_PRICE_USD
-        final_message = (
-            f"✅ **Processing Order...**\n"
+        await state.update_data(bin=key_header, quantity=quantity, price=total_price)
+        await state.set_state(PurchaseState.waiting_for_confirmation) # Move to next state
+
+        confirmation_message = (
+            f"🛒 **Order Confirmation**\n"
             f"----------------------------------------\n"
-            f"Card Type: {key_type_label} CVV\n"
-            f"Requested BIN: `{key_header}`\n"
+            f"Product: {key_type_label} Key (BIN `{key_header}`)\n"
             f"Quantity: {quantity} Keys\n"
-            f"Total Price: **${total_price:.2f} {CURRENCY}**\n"
+            f"Stock Left: {available_stock - quantity} Keys\n" 
+            f"Total Due: **${total_price:.2f} {CURRENCY}**\n"
             f"----------------------------------------\n\n"
-            f"*Integration is ready. Next step is payment and delivery integration.*"
+            f"✅ Ready to proceed to invoice?"
         )
-        await message.answer(final_message)
-        await state.clear()
+
+        await message.answer(
+            confirmation_message,
+            reply_markup=get_confirmation_keyboard(key_header, quantity),
+            parse_mode='Markdown'
+        )
+
     except (IndexError, ValueError):
+        # Handles malformed command syntax
         await message.answer(
             "❌ **Error:** Please use the correct format:\n"
-            "`get_card_by_header:<BIN> <Quantity>`\n\n"
-            "Example: `get_card_by_header:456456 10`"
+            "Example: `get_card_by_header:456456 10`",
+            parse_mode='Markdown'
         )
     except Exception:
         logger.exception("Purchase command failed")
         await message.answer("❌ An unexpected error occurred. Please try again later.")
 
+# --- HANDLER: INVOICING (Placeholder for future payment step) ---
+@router.callback_query(PurchaseState.waiting_for_confirmation, F.data.startswith("confirm"))
+async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext):
+    # This is where the NOWPayments invoice creation logic will eventually go.
+    data = await state.get_data()
+    
+    final_message = (
+        f"🔒 **INVOICING PENDING**\n"
+        f"Generated Invoice for ${data['price']:.2f} {CURRENCY}...\n"
+        f"*(This is where the user would pay. Flow complete.)*"
+    )
+    
+    await callback.message.edit_text(final_message, parse_mode='Markdown')
+    await state.clear()
+    await callback.answer()
+
 
 # --- 5. WEBHOOK/UVICORN INTEGRATION (The Production Standard) ---
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]:
+async def lifespan(app: FastAPI):
     """Initializes DB and sets Webhook once before the workers boot."""
     logger.info("--- STARTING APPLICATION LIFESPAN ---")
     
