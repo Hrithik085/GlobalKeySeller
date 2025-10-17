@@ -1,11 +1,12 @@
 import asyncio
 import os
 import logging
-from typing import Dict, Any, List, AsyncGenerator
-from contextlib import asynccontextmanager # <--- CRITICAL NEW IMPORT
+import threading # <-- NEW IMPORT
+from typing import Dict, Any, List
+from concurrent.futures import ThreadPoolExecutor # <-- NEW IMPORT
 
 from fastapi import FastAPI, Request
-from starlette.responses import Response, JSONResponse
+from starlette.responses import Response
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, CallbackQuery, Update, InlineKeyboardMarkup, InlineKeyboardButton
@@ -17,7 +18,7 @@ from aiogram.methods import SetWebhook, DeleteWebhook
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool # Ensure get_pool is imported
+from database import initialize_db, populate_initial_keys, find_available_bins, get_pool
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -36,26 +37,44 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
+# --- FastAPI App ---
+# NOTE: We use lifespan hooks here for reliable startup initialization
+app = FastAPI(title="Telegram Bot Webhook (FastAPI + aiogram)")
+
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
 BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}")
 FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 
+# Thread pool for synchronous workers to run async tasks
+executor = ThreadPoolExecutor(max_workers=5)
 
-# --- 2. FSM and KEYBOARDS (All unchanged) ---
+
+# --- FSM States ---
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
 
+
+# --- Keyboards and Handlers (No changes in logic, same functions as before) ---
 def get_key_type_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Full Info Keys", callback_data="type_select:1")],
         [InlineKeyboardButton(text="Info-less Keys", callback_data="type_select:0")]
     ])
 
-# ... (All other handlers: get_quantity_keyboard, get_country_keyboard) ...
+# Helper function to process update in a dedicated asyncio loop
+def _process_update_sync(update_data: Dict[str, Any]):
+    """Creates a new event loop to process the update asynchronously."""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(dp.feed_update(bot, Update(**update_data)))
+        loop.close()
+    except Exception:
+        logger.exception("FATAL CRASH inside thread executor while processing update.")
 
-# --- Handlers (All unchanged) ---
+# --- HANDLERS (Start, Type, Command... remain the same) ---
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
@@ -74,8 +93,6 @@ async def start_handler(message: Message, state: FSMContext):
         "**Please choose your product type below:**"
     )
     await message.answer(welcome_text, reply_markup=get_key_type_keyboard())
-
-# (The rest of the handlers are placed here)
 
 @router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
 @router.callback_query(F.data == "back_to_type")
@@ -159,77 +176,44 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         await message.answer("❌ An unexpected error occurred. Please try again later.")
 
 
-# --- 5. LIFESPAN (NEW ASGI STARTUP/SHUTDOWN HOOK) ---
+# --- Webhook Setup ---
+@app.on_event("startup")
+async def on_startup():
+    # 1. Database Initialization (Runs once)
+    await initialize_db()
+    await populate_initial_keys()
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[Dict[str, Any], None]:
-    """
-    Handles startup (DB initialization, Webhook setup) and shutdown (cleanup)
-    in the single main process before workers boot. This prevents the race condition.
-    """
-    logger.info("--- APPLICATION STARTUP: INITIALIZING RESOURCES ---")
-
-    # 1. DATABASE SETUP (Initialization and Population)
-    try:
-        await initialize_db()
-        await populate_initial_keys() # Only runs if table is empty
-        logger.info("Database setup and population complete.")
-    except Exception as e:
-        logger.critical(f"FATAL DB ERROR: Cannot start application without DB: {e}")
-        # Raising SystemExit here prevents the application from booting crashed workers
-        raise SystemExit(1)
-
-    # 2. TELEGRAM WEBHOOK SETUP (Set only once)
+    # 2. Webhook Setup (Runs once)
     if BASE_WEBHOOK_URL:
         full_webhook = BASE_WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
-        logger.info("Attempting to set Telegram webhook...")
-
-        # We wrap the set_webhook call in a try block to ignore the rate limit errors on startup
         try:
             await bot(DeleteWebhook(drop_pending_updates=True))
             await bot(SetWebhook(url=full_webhook))
             logger.info(f"Webhook successfully set to: {full_webhook}")
-        except asyncio.CancelledError:
-            raise # Re-raise CancelledError
-        except Exception as e:
-            # This handles the Flood Control error (TelegramRetryAfter)
-            logger.warning(f"Failed to set webhook (Expected during concurrent startup): {e}")
+        except Exception:
+            logger.exception("Failed to set webhook")
 
-    # Yield control back to Uvicorn to boot workers
-    yield
-
-    # --- SHUTDOWN LOGIC (Executed when Uvicorn shuts down) ---
-    logger.info("--- APPLICATION SHUTDOWN: CLEANUP ---")
-    try:
-        # Close bot session
-        await bot.session.close()
-    except Exception:
-        logger.warning("Bot session failed to close.")
-
-    # Close database pool
-    pool = await get_pool()
-    await pool.close()
-    logger.info("All resources cleaned up successfully.")
-
-
-# 3. Apply the lifespan to the FastAPI application
-app = FastAPI(
-    title="Telegram Bot Webhook (FastAPI + aiogram)",
-    lifespan=lifespan
-)
-
-# ... (End of file remains the same) ...
 
 @app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request):
+def telegram_webhook(request: Request):
+    """
+    SYNCHRONOUS endpoint that receives the update and delegates ASYNC processing
+    to a worker thread pool.
+    """
     try:
-        update_data: Dict[str, Any] = await request.json()
-        if update_data:
-            await dp.feed_update(bot, Update(**update_data))
+        # Retrieve data synchronously (correct for Flask/Starlette)
+        update_data: Dict[str, Any] = request.json()
+        if not update_data:
+            return Response(status_code=400) # Bad Request
 
-    except Exception as e:
-        logger.exception(f"CRITICAL WEBHOOK PROCESSING ERROR: {e}")
+        # Delegate the ASYNC processing to a thread pool (CRITICAL FIX)
+        executor.submit(_process_update_sync, update_data)
 
+    except Exception:
+        logger.exception("Failed to parse or delegate webhook request.")
+        return Response(status_code=500)
+
+    # Must return 200 OK immediately
     return Response(status_code=200)
 
 @app.get("/")
