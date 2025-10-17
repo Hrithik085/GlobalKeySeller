@@ -13,13 +13,16 @@ async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
         if not DATABASE_URL:
-            # IMPORTANT: This error is caught in the executable block below
             raise RuntimeError("DATABASE_URL environment variable is required")
+
+        # --- CRITICAL SSL FIX ---
+        conn_string = f"{DATABASE_URL}?ssl=true" if 'ssl=' not in DATABASE_URL else DATABASE_URL
+
         # Optimization: Use a smaller pool size for a single-service application
-        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=4)
+        _pool = await asyncpg.create_pool(conn_string, min_size=1, max_size=4)
     return _pool
 
-# --- Database Schema Functions ---
+# --- Database Schema Functions (Using Pool) ---
 
 async def initialize_db():
     pool = await get_pool()
@@ -55,7 +58,7 @@ async def find_available_bins(is_full_info: bool) -> List[str]:
         )
         return [r["key_header"] for r in rows]
 
-# --- Population Logic ---
+# --- Population Logic (Uses Pool) ---
 
 async def populate_initial_keys():
     """Populates the database with your starting inventory."""
@@ -77,17 +80,27 @@ async def populate_initial_keys():
         else:
             print("Inventory already populated. Skipping insertion.")
 
+# --- NEW WRAPPER FUNCTION ---
+async def main_setup():
+    """Wrapper to run both setup functions sequentially in one context."""
+    print("To run: Initializing and populating DB...")
+
+    # 1. Run initialization (creates table)
+    await initialize_db()
+    # 2. Run population (inserts keys)
+    await populate_initial_keys()
+
+    # Optional: Close the global pool after running the script
+    global _pool
+    if _pool:
+        await _pool.close()
+
 
 # --- EXECUTABLE BLOCK (CRITICAL FIX) ---
 if __name__ == '__main__':
-    # This block runs the setup/population functions when the file is called directly.
-
-    # 1. Run Initialization (creates table) and Population (adds data)
     try:
-        # Run initialization first to ensure table exists
-        asyncio.run(initialize_db())
-        # Then run population
-        asyncio.run(populate_initial_keys())
+        # ONLY ONE asyncio.run() CALL!
+        asyncio.run(main_setup())
 
     except RuntimeError as e:
         if "DATABASE_URL" in str(e):
@@ -96,5 +109,3 @@ if __name__ == '__main__':
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
-
-
