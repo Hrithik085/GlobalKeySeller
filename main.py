@@ -11,6 +11,7 @@ from aiogram.types import Message, CallbackQuery, Update, InlineKeyboardMarkup, 
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
+from aiogram.client.default import DefaultBotProperties  # ✅ NEW IMPORT
 
 from config import BOT_TOKEN, BASE_WEBHOOK_URL, WEBHOOK_PATH, CURRENCY, KEY_PRICE_USD
 from database import initialize_db, populate_initial_keys, find_available_bins, get_pool
@@ -22,7 +23,12 @@ if not BOT_TOKEN:
     logger.critical("BOT_TOKEN missing in environment. Set BOT_TOKEN and redeploy.")
     raise RuntimeError("BOT_TOKEN environment variable is required")
 
-bot = Bot(token=BOT_TOKEN, parse_mode="Markdown")
+# ✅ FIXED: use DefaultBotProperties instead of deprecated parse_mode param
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode="Markdown")
+)
+
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -157,11 +163,9 @@ async def telegram_webhook(request: Request):
 # Startup & Shutdown
 @app.on_event("startup")
 async def on_startup():
-    # Initialize DB and (optional) seed
     await initialize_db()
     await populate_initial_keys()
 
-    # Set webhook if BASE_WEBHOOK_URL provided
     if BASE_WEBHOOK_URL:
         full_webhook = BASE_WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
         logger.info("Setting webhook to: %s", full_webhook)
@@ -189,5 +193,4 @@ async def on_shutdown():
         pool = await get_pool()
         await pool.close()
     except Exception:
-        # If pool not initialized, ignore
-        pass
+        pass  # ignore uninitialized pool
