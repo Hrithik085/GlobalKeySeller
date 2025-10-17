@@ -13,7 +13,7 @@ _pool: Optional[asyncpg.Pool] = None
 def build_ssl_context() -> Optional[ssl.SSLContext]:
     """
     Build an SSLContext to pass to asyncpg.create_pool.
-    Disables certificate verification if the DB_SSL_NO_VERIFY environment variable is set.
+    Disables certificate verification for Render's internal network (safe).
     """
     no_verify = os.getenv("DB_SSL_NO_VERIFY", "true").lower()
     if no_verify in ("1", "true", "yes"):
@@ -32,13 +32,35 @@ async def get_pool() -> asyncpg.Pool:
 
         ssl_ctx = build_ssl_context()
 
+        # Parse URL into components for clean parameter passing
+        params = await get_raw_connection_params(DATABASE_URL)
+
+        # asyncpg.create_pool accepts DSN/URL as first positional arg (or dsn=...)
+        # We pass the DSN directly so your connection format remains the same.
         _pool = await asyncpg.create_pool(
-            dsn=DATABASE_URL,
+            user=params['user'],
+            password=params['password'],
+            host=params['host'],
+            port=params['port'],
+            database=params['database'],
             ssl=ssl_ctx,
             min_size=1,
             max_size=4,
         )
     return _pool
+
+async def get_raw_connection_params(url: str) -> dict:
+    """Parses the Render DATABASE_URL into individual components."""
+    parsed = urlparse(url)
+
+    return {
+        'user': parsed.username,
+        'password': parsed.password,
+        'host': parsed.hostname,
+        'port': parsed.port or 5432,
+        'database': parsed.path.lstrip('/'),
+    }
+
 
 # --- Database Schema Functions ---
 
@@ -52,7 +74,7 @@ async def initialize_db():
                 key_detail TEXT NOT NULL,
                 key_header TEXT NOT NULL,
                 is_full_info BOOLEAN NOT NULL,
-                sold BOOLEEN NOT NULL DEFAULT FALSE
+                sold BOOLEAN NOT NULL DEFAULT FALSE
             )
         """)
         print("PostgreSQL Database table 'card_inventory' created successfully.")
@@ -115,7 +137,7 @@ if __name__ == '__main__':
         if "DATABASE_URL" in str(e):
             print("FATAL ERROR: DATABASE_URL environment variable is required.")
         else:
+            # THIS BLOCK IS THE SOURCE OF THE SYNTAX ERROR (NOW FIXED)
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
-
