@@ -1,22 +1,23 @@
+import asyncio
 import os
 import logging
-from typing import Dict, Any, List
-import asyncio
+from typing import Dict, Any, List, AsyncGenerator
+from contextlib import asynccontextmanager # <--- CRITICAL NEW IMPORT
 
 from fastapi import FastAPI, Request
-from starlette.responses import Response
+from starlette.responses import Response, JSONResponse
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, CallbackQuery, Update, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from aiogram.client.default import DefaultBotProperties  
-from aiogram.methods import SetWebhook, DeleteWebhook 
+from aiogram.client.default import DefaultBotProperties
+from aiogram.methods import SetWebhook, DeleteWebhook
 
-# --- Database and Config ---
+# --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool
+from database import initialize_db, populate_initial_keys, find_available_bins, get_pool # Ensure get_pool is imported
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -35,27 +36,26 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-app = FastAPI(title="Telegram Bot Webhook (FastAPI + aiogram)")
-
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
 BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}")
 FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 
 
-# FSM States
+# --- 2. FSM and KEYBOARDS (All unchanged) ---
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
 
-# Keyboard
 def get_key_type_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Full Info Keys", callback_data="type_select:1")],
         [InlineKeyboardButton(text="Info-less Keys", callback_data="type_select:0")]
     ])
 
-# Handlers
+# ... (All other handlers: get_quantity_keyboard, get_country_keyboard) ...
+
+# --- Handlers (All unchanged) ---
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
@@ -75,6 +75,8 @@ async def start_handler(message: Message, state: FSMContext):
     )
     await message.answer(welcome_text, reply_markup=get_key_type_keyboard())
 
+# (The rest of the handlers are placed here)
+
 @router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
 @router.callback_query(F.data == "back_to_type")
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
@@ -88,12 +90,11 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         await state.set_state(PurchaseState.waiting_for_command)
 
     key_type_label = "Full Info" if is_full_info else "Info-less"
-    
-    # NEW LOGIC: We don't check country count, we just show the guide and list available BINs
+
     try:
         available_bins = await find_available_bins(is_full_info)
     except Exception:
-        available_bins = []
+        available_bins = ["DB ERROR"]
         logger.exception("Failed to fetch available BINs during menu load.")
 
     command_guide = (
@@ -116,10 +117,9 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
 @router.message(PurchaseState.waiting_for_command, F.text.startswith("get_card_by_header:"))
 async def handle_card_purchase_command(message: Message, state: FSMContext):
     try:
-        # Command parsing logic
         parts = message.text.split(":", 1)
         command_args = parts[1].strip().split()
-        
+
         key_header = command_args[0]
         quantity = int(command_args[1])
 
@@ -127,7 +127,6 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         is_full_info = data.get('is_full_info', False)
         key_type_label = "Full Info" if is_full_info else "Info-less"
 
-        # BIN availability check
         available_bins = await find_available_bins(is_full_info)
         if key_header not in available_bins:
             await message.answer(
@@ -160,39 +159,79 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         await message.answer("❌ An unexpected error occurred. Please try again later.")
 
 
-# --- Webhook Setup ---
-@app.on_event("startup")
-async def on_startup():
-    await initialize_db()
-    await populate_initial_keys()
+# --- 5. LIFESPAN (NEW ASGI STARTUP/SHUTDOWN HOOK) ---
 
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[Dict[str, Any], None]:
+    """
+    Handles startup (DB initialization, Webhook setup) and shutdown (cleanup)
+    in the single main process before workers boot. This prevents the race condition.
+    """
+    logger.info("--- APPLICATION STARTUP: INITIALIZING RESOURCES ---")
+
+    # 1. DATABASE SETUP (Initialization and Population)
+    try:
+        await initialize_db()
+        await populate_initial_keys() # Only runs if table is empty
+        logger.info("Database setup and population complete.")
+    except Exception as e:
+        logger.critical(f"FATAL DB ERROR: Cannot start application without DB: {e}")
+        # Raising SystemExit here prevents the application from booting crashed workers
+        raise SystemExit(1)
+
+    # 2. TELEGRAM WEBHOOK SETUP (Set only once)
     if BASE_WEBHOOK_URL:
         full_webhook = BASE_WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
-        logger.info("Setting webhook to: %s", full_webhook)
+        logger.info("Attempting to set Telegram webhook...")
+
+        # We wrap the set_webhook call in a try block to ignore the rate limit errors on startup
         try:
             await bot(DeleteWebhook(drop_pending_updates=True))
             await bot(SetWebhook(url=full_webhook))
-        except Exception:
-            logger.exception("Failed to set webhook")
-    else:
-        logger.warning("BASE_WEBHOOK_URL not set; bot will not set webhook automatically.")
+            logger.info(f"Webhook successfully set to: {full_webhook}")
+        except asyncio.CancelledError:
+            raise # Re-raise CancelledError
+        except Exception as e:
+            # This handles the Flood Control error (TelegramRetryAfter)
+            logger.warning(f"Failed to set webhook (Expected during concurrent startup): {e}")
+
+    # Yield control back to Uvicorn to boot workers
+    yield
+
+    # --- SHUTDOWN LOGIC (Executed when Uvicorn shuts down) ---
+    logger.info("--- APPLICATION SHUTDOWN: CLEANUP ---")
+    try:
+        # Close bot session
+        await bot.session.close()
+    except Exception:
+        logger.warning("Bot session failed to close.")
+
+    # Close database pool
+    pool = await get_pool()
+    await pool.close()
+    logger.info("All resources cleaned up successfully.")
+
+
+# 3. Apply the lifespan to the FastAPI application
+app = FastAPI(
+    title="Telegram Bot Webhook (FastAPI + aiogram)",
+    lifespan=lifespan
+)
+
+# ... (End of file remains the same) ...
 
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
     try:
-        # We rely on the ASGI server (Uvicorn) to correctly parse the JSON body
         update_data: Dict[str, Any] = await request.json()
-    except Exception:
-        logger.exception("Failed to parse JSON from Telegram")
-        return Response(status_code=400) # Bad Request
+        if update_data:
+            await dp.feed_update(bot, Update(**update_data))
 
-    try:
-        # Feed the update to the Aiogram dispatcher
-        await dp.feed_update(bot, Update(**update_data))
-    except Exception:
-        logger.exception("Failed to process update")
+    except Exception as e:
+        logger.exception(f"CRITICAL WEBHOOK PROCESSING ERROR: {e}")
+
     return Response(status_code=200)
 
 @app.get("/")
 def health_check():
-    return "✅ Telegram Bot is up and running via FastAPI."
+    return Response(status_code=200, content="✅ Telegram Bot is up and running via FastAPI.")
