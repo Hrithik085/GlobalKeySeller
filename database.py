@@ -1,49 +1,58 @@
+# database.py
 import os
-from typing import List, Optional
 import asyncio
-import asyncpg
-from urllib.parse import urlparse # Needed to safely parse connection string
+from typing import List, Optional
 
-# --- Configuration ---
+import asyncpg
+import ssl
+
+# Read the full DATABASE_URL DSN string from config or env (keeps same format)
 from config import DATABASE_URL
 
-# --- Global Pool Management ---
 _pool: Optional[asyncpg.Pool] = None
 
-async def get_raw_connection_params(url: str) -> dict:
-    """Parses the Render DATABASE_URL into individual components."""
-    # Uses urllib.parse to safely break the URL into components
-    parsed = urlparse(url)
-
-    params = {
-        'user': parsed.username,
-        'password': parsed.password,
-        'host': parsed.hostname,
-        'port': parsed.port or 5432,
-        'database': parsed.path.lstrip('/'),
-        # CRITICAL FIX: Pass 'ssl=True' explicitly as a separate parameter,
-        # avoiding string manipulation conflicts in the URL path.
-        'ssl': True
-    }
-    return params
-
+def build_ssl_context() -> Optional[ssl.SSLContext]:
+    """
+    Build an SSLContext to pass to asyncpg.create_pool.
+    If DB_SSL_NO_VERIFY is set to "1", "true", or "yes" (case-insensitive),
+    the context will disable verification (useful for self-signed certs in dev).
+    If not set, returns None (let asyncpg use default behavior).
+    """
+    no_verify = os.getenv("DB_SSL_NO_VERIFY", "true").lower()  # default to true for Render dev
+    if no_verify in ("1", "true", "yes"):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    # Return None to use default verification (recommended for production)
+    return None
 
 async def get_pool() -> asyncpg.Pool:
+    """
+    Return a global asyncpg pool.
+    Uses the DATABASE_URL DSN directly (no parsing) and passes ssl context via `ssl=...`.
+    """
     global _pool
     if _pool is None:
         if not DATABASE_URL:
             raise RuntimeError("DATABASE_URL environment variable is required")
 
-        # Pass raw, explicit parameters instead of the problematic URL string
-        params = await get_raw_connection_params(DATABASE_URL)
+        ssl_ctx = build_ssl_context()
 
-        # Use explicit parameter unpacking for creation
-        _pool = await asyncpg.create_pool(**params, min_size=1, max_size=4)
+        # asyncpg.create_pool accepts DSN/URL as first positional arg (or dsn=...)
+        # We pass the DSN directly so your connection format remains the same.
+        _pool = await asyncpg.create_pool(
+            dsn=DATABASE_URL,
+            ssl=ssl_ctx,
+            min_size=1,
+            max_size=4,
+        )
     return _pool
 
 # --- Database Schema Functions ---
 
 async def initialize_db():
+    """Create the card_inventory table if it does not exist."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -57,8 +66,8 @@ async def initialize_db():
         """)
         print("PostgreSQL Database table 'card_inventory' created successfully.")
 
-
 async def add_key(key_detail: str, key_header: str, is_full_info: bool):
+    """Add a single key to the card_inventory table."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -79,18 +88,18 @@ async def find_available_bins(is_full_info: bool) -> List[str]:
 # --- Population Logic ---
 
 async def populate_initial_keys():
+    """Populate the card_inventory table with initial sample data if empty."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # Check if the table is empty before inserting data
         count = await conn.fetchval("SELECT COUNT(*) FROM card_inventory")
 
         if count == 0:
             print("Populating initial card inventory...")
-            # Sample Full Info Cards (is_full_info=True)
+            # Sample Full Info Cards
             await add_key("456456xxxxxxxxxx|09/27|123|John Doe|NY", "456456", True)
             await add_key("456456xxxxxxxxxx|08/26|456|Jane Doe|CA", "456456", True)
 
-            # Sample Info-less Cards (is_full_info=False)
+            # Sample Info-less Cards
             await add_key("543210xxxxxxxxxx|12/25|789", "543210", False)
             await add_key("543210xxxxxxxxxx|11/24|012", "543210", False)
             print("Initial card inventory population complete.")
@@ -99,13 +108,14 @@ async def populate_initial_keys():
 
 # --- EXECUTABLE BLOCK (For Shell Commands) ---
 async def main_setup():
-    print("To run: Initializing and populating DB...")
+    print("Initializing and populating DB...")
     await initialize_db()
     await populate_initial_keys()
 
     global _pool
     if _pool:
         await _pool.close()
+        _pool = None
 
 if __name__ == '__main__':
     try:
@@ -116,4 +126,4 @@ if __name__ == '__main__':
         else:
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(f"An unex
