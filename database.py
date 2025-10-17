@@ -1,10 +1,9 @@
-# db.py
+# database.py
 import os
-import asyncpg
-import asyncio
 from typing import List, Optional
+import asyncpg
 
-DATABASE_URL = os.getenv("DATABASE_URL")  # e.g. postgres://user:pass@host:5432/dbname
+from config import DATABASE_URL
 
 _pool: Optional[asyncpg.Pool] = None
 
@@ -17,9 +16,9 @@ async def get_pool() -> asyncpg.Pool:
     return _pool
 
 async def initialize_db():
-    """Initialize pool and create table if it doesn't exist."""
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # Create table if not exists
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS card_inventory (
                 id SERIAL PRIMARY KEY,
@@ -39,7 +38,7 @@ async def add_key(key_detail: str, key_header: str, is_full_info: bool):
         )
 
 async def find_available_bins(is_full_info: bool) -> List[str]:
-    """Returns distinct key_header values for unsold cards of the given type."""
+    """Return distinct key_header values for unsold cards of the given type."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -49,11 +48,8 @@ async def find_available_bins(is_full_info: bool) -> List[str]:
         return [r["key_header"] for r in rows]
 
 async def populate_initial_keys():
-    """Optional helper to seed sample values (call from startup if desired)."""
-    # Avoid duplicate seeding in production; check first if needed.
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # check existing
         count = await conn.fetchval("SELECT COUNT(*) FROM card_inventory")
         if count == 0:
             await conn.execute(
