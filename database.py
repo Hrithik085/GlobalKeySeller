@@ -15,7 +15,7 @@ def build_ssl_context() -> Optional[ssl.SSLContext]:
     Build an SSLContext to pass to asyncpg.create_pool.
     Disables certificate verification if the DB_SSL_NO_VERIFY environment variable is set.
     """
-    no_verify = os.getenv("DB_SSL_NO_VERIFY", "true").lower()  # default to true for Render dev
+    no_verify = os.getenv("DB_SSL_NO_VERIFY", "true").lower()
     if no_verify in ("1", "true", "yes"):
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
@@ -24,10 +24,7 @@ def build_ssl_context() -> Optional[ssl.SSLContext]:
     return None
 
 async def get_pool() -> asyncpg.Pool:
-    """
-    Return a global asyncpg pool.
-    Uses the DATABASE_URL DSN directly (no parsing) and passes ssl context via `ssl=...`.
-    """
+    """Return a global asyncpg pool."""
     global _pool
     if _pool is None:
         if not DATABASE_URL:
@@ -35,8 +32,6 @@ async def get_pool() -> asyncpg.Pool:
 
         ssl_ctx = build_ssl_context()
 
-        # asyncpg.create_pool accepts DSN/URL as first positional arg (or dsn=...)
-        # We pass the DSN directly so your connection format remains the same.
         _pool = await asyncpg.create_pool(
             dsn=DATABASE_URL,
             ssl=ssl_ctx,
@@ -57,7 +52,7 @@ async def initialize_db():
                 key_detail TEXT NOT NULL,
                 key_header TEXT NOT NULL,
                 is_full_info BOOLEAN NOT NULL,
-                sold BOOLEAN NOT NULL DEFAULT FALSE
+                sold BOOLEEN NOT NULL DEFAULT FALSE
             )
         """)
         print("PostgreSQL Database table 'card_inventory' created successfully.")
@@ -122,5 +117,5 @@ if __name__ == '__main__':
         else:
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
-        # NOTE: This line was the source of the SyntaxError. It is now corrected.
         print(f"An unexpected error occurred: {e}")
+
