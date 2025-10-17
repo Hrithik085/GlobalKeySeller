@@ -3,3 +3,4 @@ asyncpg
 fastapi
 uvicorn
 python-dotenv
+Flask
