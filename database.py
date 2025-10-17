@@ -35,8 +35,6 @@ async def get_pool() -> asyncpg.Pool:
         # Parse URL into components for clean parameter passing
         params = await get_raw_connection_params(DATABASE_URL)
 
-        # asyncpg.create_pool accepts DSN/URL as first positional arg (or dsn=...)
-        # We pass the DSN directly so your connection format remains the same.
         _pool = await asyncpg.create_pool(
             user=params['user'],
             password=params['password'],
@@ -52,7 +50,7 @@ async def get_pool() -> asyncpg.Pool:
 async def get_raw_connection_params(url: str) -> dict:
     """Parses the Render DATABASE_URL into individual components."""
     parsed = urlparse(url)
-
+    
     return {
         'user': parsed.username,
         'password': parsed.password,
@@ -87,6 +85,19 @@ async def add_key(key_detail: str, key_header: str, is_full_info: bool):
             "INSERT INTO card_inventory (key_detail, key_header, is_full_info) VALUES ($1, $2, $3)",
             key_detail, key_header, is_full_info
         )
+
+# --- FINAL MISSING FUNCTION ADDED HERE ---
+async def check_stock_count(key_header: str, is_full_info: bool) -> int:
+    """Returns the count of UNSOLD cards for a specific BIN and type."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("""
+            SELECT COUNT(*) FROM card_inventory 
+            WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
+        """, key_header, is_full_info)
+        return count if count is not None else 0
+# --- END FINAL MISSING FUNCTION ---
+
 
 async def find_available_bins(is_full_info: bool) -> List[str]:
     """Return distinct key_header values for unsold cards of the given type."""
@@ -137,7 +148,6 @@ if __name__ == '__main__':
         if "DATABASE_URL" in str(e):
             print("FATAL ERROR: DATABASE_URL environment variable is required.")
         else:
-            # THIS BLOCK IS THE SOURCE OF THE SYNTAX ERROR (NOW FIXED)
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
