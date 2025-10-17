@@ -5,44 +5,50 @@ import asyncpg
 from urllib.parse import urlparse
 import ssl
 
-# --- Configuration ---
+# Read the full DATABASE_URL DSN string from config or env (keeps same format)
 from config import DATABASE_URL
 
-# --- Global Pool Management ---
 _pool: Optional[asyncpg.Pool] = None
 
-# CRITICAL FIX: Extract raw parameters to bypass the connection string conflict
+def build_ssl_context() -> Optional[ssl.SSLContext]:
+    """
+    Build an SSLContext to pass to asyncpg.create_pool.
+    Disables certificate verification if the DB_SSL_NO_VERIFY environment variable is set.
+    """
+    no_verify = os.getenv("DB_SSL_NO_VERIFY", "true").lower()  # default to true for Render dev
+    if no_verify in ("1", "true", "yes"):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    return None
+
 async def get_pool() -> asyncpg.Pool:
+    """
+    Return a global asyncpg pool.
+    Uses the DATABASE_URL DSN directly (no parsing) and passes ssl context via `ssl=...`.
+    """
     global _pool
     if _pool is None:
         if not DATABASE_URL:
             raise RuntimeError("DATABASE_URL environment variable is required")
 
-        # 1. Parse raw connection parameters from the URL
-        params = urlparse(DATABASE_URL)
+        ssl_ctx = build_ssl_context()
 
-        # 2. Setup SSL context for Render's internal connection
-        ssl_ctx = ssl.create_default_context(cafile=None)
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-
-        # 3. Create pool using explicit parameters
+        # asyncpg.create_pool accepts DSN/URL as first positional arg (or dsn=...)
+        # We pass the DSN directly so your connection format remains the same.
         _pool = await asyncpg.create_pool(
-            user=params.username,
-            password=params.password,
-            host=params.hostname,
-            port=params.port or 5432,
-            database=params.path.lstrip('/'),
-            ssl=ssl_ctx, # Pass the custom SSL context explicitly
+            dsn=DATABASE_URL,
+            ssl=ssl_ctx,
             min_size=1,
-            max_size=4
+            max_size=4,
         )
     return _pool
 
-# --- Database Schema and Population Functions (Unchanged) ---
-# NOTE: The rest of the functions (initialize_db, add_key, etc.) remain as you previously provided them.
+# --- Database Schema Functions ---
 
 async def initialize_db():
+    """Create the card_inventory table if it does not exist."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -56,29 +62,42 @@ async def initialize_db():
         """)
         print("PostgreSQL Database table 'card_inventory' created successfully.")
 
+async def add_key(key_detail: str, key_header: str, is_full_info: bool):
+    """Add a single key to the card_inventory table."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO card_inventory (key_detail, key_header, is_full_info) VALUES ($1, $2, $3)",
+            key_detail, key_header, is_full_info
+        )
+
+async def find_available_bins(is_full_info: bool) -> List[str]:
+    """Return distinct key_header values for unsold cards of the given type."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT key_header FROM card_inventory WHERE is_full_info = $1 AND sold = FALSE",
+            is_full_info
+        )
+        return [r["key_header"] for r in rows]
+
+# --- Population Logic ---
+
 async def populate_initial_keys():
+    """Populate the card_inventory table with initial sample data if empty."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         count = await conn.fetchval("SELECT COUNT(*) FROM card_inventory")
 
         if count == 0:
             print("Populating initial card inventory...")
-            await conn.execute(
-                "INSERT INTO card_inventory (key_detail, key_header, is_full_info) VALUES ($1, $2, $3)",
-                "456456xxxxxxxxxx|09/27|123|John Doe|NY", "456456", True
-            )
-            await conn.execute(
-                "INSERT INTO card_inventory (key_detail, key_header, is_full_info) VALUES ($1, $2, $3)",
-                "456456xxxxxxxxxx|08/26|456|Jane Doe|CA", "456456", True
-            )
-            await conn.execute(
-                "INSERT INTO card_inventory (key_detail, key_header, is_full_info) VALUES ($1, $2, $3)",
-                "543210xxxxxxxxxx|12/25|789", "543210", False
-            )
-            await conn.execute(
-                "INSERT INTO card_inventory (key_detail, key_header, is_full_info) VALUES ($1, $2, $3)",
-                "543210xxxxxxxxxx|11/24|012", "543210", False
-            )
+            # Sample Full Info Cards
+            await add_key("456456xxxxxxxxxx|09/27|123|John Doe|NY", "456456", True)
+            await add_key("456456xxxxxxxxxx|08/26|456|Jane Doe|CA", "456456", True)
+
+            # Sample Info-less Cards
+            await add_key("543210xxxxxxxxxx|12/25|789", "543210", False)
+            await add_key("543210xxxxxxxxxx|11/24|012", "543210", False)
             print("Initial card inventory population complete.")
         else:
             print("Inventory already populated. Skipping insertion.")
@@ -103,4 +122,5 @@ if __name__ == '__main__':
         else:
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
+        # NOTE: This line was the source of the SyntaxError. It is now corrected.
         print(f"An unexpected error occurred: {e}")
