@@ -81,7 +81,6 @@ async def start_handler(message: Message, state: FSMContext):
         "  • 24/7 Service\n"
         "  • Instant Delivery\n"
         "  • Secure Transactions\n\n"
-        "💰 Deposit to start shopping\n"
         "📊 Track all your transactions\n\n"
         "🔐 Your security is our top priority\n\n"
         "**Please choose your product type below:**"
