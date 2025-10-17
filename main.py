@@ -1,8 +1,7 @@
 import asyncio
 import os
 import logging
-from typing import Dict, Any, List, Generator # <-- FIX: Use Generator as return type hint for lifespan
-from multiprocessing import current_process
+from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
 
 from fastapi import FastAPI, Request
@@ -13,7 +12,7 @@ from aiogram.types import Message, CallbackQuery, Update, InlineKeyboardMarkup, 
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from aiogram.client.default import DefaultBotProperties  
+from aiogram.client.default import DefaultBotProperties
 from aiogram.methods import SetWebhook, DeleteWebhook 
 
 # --- Database and Config Imports ---
@@ -43,7 +42,7 @@ BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{os.getenv('RENDE
 FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 
 
-# --- 2. FSM States and Keyboards (All Unchanged) ---
+# --- 2. FSM States and Keyboards ---
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
@@ -54,7 +53,6 @@ def get_key_type_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Info-less Keys", callback_data="type_select:0")]
     ])
 
-# NOTE: The get_quantity_keyboard is not used in the final version, but kept for future use.
 def get_quantity_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="1 Key", callback_data="qty_select:1"),
@@ -64,7 +62,7 @@ def get_quantity_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-# --- Handlers (Fix Applied Here) ---
+# --- Handlers ---
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
@@ -85,24 +83,21 @@ async def start_handler(message: Message, state: FSMContext):
     await message.answer(welcome_text, reply_markup=get_key_type_keyboard())
 
 # --- TYPE SELECTION (Shows Command Guide) ---
-# CRITICAL FIX: Add 'waiting_for_command' state registration here!
 @router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
 @router.callback_query(PurchaseState.waiting_for_command, F.data == "back_to_type") 
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     
     if callback.data == "back_to_type":
-        # If coming from the 'Back' button, just load previous state data
-        data = await state.get_data()
-        is_full_info = data.get('is_full_info', False)
-        # We explicitly set state back to waiting_for_type
-        await state.set_state(PurchaseState.waiting_for_type) 
-    else:
-        # Normal selection flow
-        is_full_info_str = callback.data.split(":")[1]
-        is_full_info = (is_full_info_str == '1')
-        await state.update_data(is_full_info=is_full_info)
-        # Move forward to the command input state
-        await state.set_state(PurchaseState.waiting_for_command) 
+        # FIX FOR BACK BUTTON: Call start_handler logic to send the initial menu
+        await start_handler(callback.message, state) 
+        await callback.answer()
+        return
+    
+    # --- Standard Selection Flow ---
+    is_full_info_str = callback.data.split(":")[1]
+    is_full_info = (is_full_info_str == '1')
+    await state.update_data(is_full_info=is_full_info)
+    await state.set_state(PurchaseState.waiting_for_command) 
 
     key_type_label = "Full Info" if is_full_info else "Info-less"
     
@@ -112,14 +107,19 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         available_bins = ["DB ERROR"]
         logger.exception("Failed to fetch available BINs during menu load.")
 
+    # --- UPDATED COMMAND GUIDE CONTENT (Copyable Block Fix) ---
     command_guide = (
         f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
-        f"**`get_card_by_header:<BIN> <Quantity>`**\n\n"
+        
+        # This is the line the user needs to copy: put it inside triple backticks
+        f"```\nget_card_by_header:<BIN> <Quantity>\n```\n" 
+        
         f"✨ Example for buying 10 Keys:\n"
         f"**`get_card_by_header:456456 10`**\n\n"
         f"Available BINs in stock: {', '.join(available_bins) if available_bins else 'None'}"
     )
+    # --- END UPDATED COMMAND GUIDE CONTENT ---
 
     await callback.message.edit_text(
         command_guide,
@@ -131,7 +131,7 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
 # --- End of handle_type_selection ---
 
 
-# --- Command Purchase Handler (Unchanged) ---
+# --- Command Purchase Handler (Final Logic) ---
 @router.message(PurchaseState.waiting_for_command, F.text.startswith("get_card_by_header:"))
 async def handle_card_purchase_command(message: Message, state: FSMContext):
     try:
@@ -177,23 +177,20 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         await message.answer("❌ An unexpected error occurred. Please try again later.")
 
 
-# --- 5. WEBHOOK/UVICORN INTEGRATION (Production Webhook Mode) ---
+# --- 5. WEBHOOK/UVICORN INTEGRATION (The Production Standard) ---
 
-# --- Lifespan Manager (The FINAL Startup Fix) ---
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]: # <-- CORRECTED HINT
+async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]:
     """Initializes DB and sets Webhook once before the workers boot."""
     logger.info("--- STARTING APPLICATION LIFESPAN ---")
     
     # 1. DATABASE SETUP (Initialization and Population)
     try:
-        # These database calls are safe now because the code uses pools and explicit SSL
         await initialize_db()
         await populate_initial_keys()
         logger.info("Database setup and population complete.")
     except Exception as e:
         logger.critical(f"FATAL DB ERROR: Cannot initialize resources: {e}")
-        # Raising SystemExit here prevents the application from booting crashed workers
         raise SystemExit(1)
     
     # 2. TELEGRAM WEBHOOK SETUP (Set only once)
@@ -247,5 +244,3 @@ async def telegram_webhook(request: Request):
 @app.get("/")
 def health_check():
     return Response(status_code=200, content="✅ Telegram Bot is up and running via FastAPI.")
-
-    
