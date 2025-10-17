@@ -17,8 +17,11 @@ except ValueError:
 # Webhook base url:
 # Render provides RENDER_EXTERNAL_HOSTNAME automatically for services. If you
 # prefer explicit BASE_WEBHOOK_URL, set that env var instead.
+# Webhook base url logic: ensures we use the RENDER_EXTERNAL_HOSTNAME safely
 RENDER_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{RENDER_HOSTNAME}" if RENDER_HOSTNAME else None)
+
+# CRITICAL FIX: If RENDER_HOSTNAME is not set, BASE_WEBHOOK_URL must be None
+BASE_WEBHOOK_URL = f"https://{RENDER_HOSTNAME}" if RENDER_HOSTNAME else None
 
 # Webhook path (keeps it consistent)
 WEBHOOK_PATH = "/telegram"
