@@ -1,9 +1,8 @@
 import asyncio
 import os
 import logging
-import threading
-from typing import Dict, Any, List
-from multiprocessing import current_process # <--- CRITICAL NEW IMPORT
+from typing import Dict, Any, AsyncGenerator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -13,12 +12,13 @@ from aiogram.types import Message, CallbackQuery, Update, InlineKeyboardMarkup, 
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from aiogram.client.default import DefaultBotProperties
-from aiogram.methods import SetWebhook, DeleteWebhook
+from aiogram.client.default import DefaultBotProperties  
+from aiogram.methods import SetWebhook, DeleteWebhook 
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool
+# We need to import all DB functions to avoid crashes
+from database import initialize_db, populate_initial_keys, find_available_bins, get_pool 
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -37,27 +37,87 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-app = FastAPI(title="Telegram Bot Webhook (FastAPI + aiogram)")
-
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
 BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}")
 FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 
 
-# FSM States
+# --- FSM States and Keyboards (All Unchanged) ---
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
 
-# Keyboard
 def get_key_type_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Full Info Keys", callback_data="type_select:1")],
         [InlineKeyboardButton(text="Info-less Keys", callback_data="type_select:0")]
     ])
 
-# Handlers (Remaining functions are unchanged)
+def get_quantity_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1 Key", callback_data="qty_select:1"),
+         InlineKeyboardButton(text="3 Keys", callback_data="qty_select:3")],
+        [InlineKeyboardButton(text="5 Keys", callback_data="qty_select:5")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_command")] 
+    ])
+
+
+# --- The Lifespan Manager (The FINAL Startup Fix) ---
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[Dict[str, Any], None]:
+    """Initializes DB and sets Webhook once before the workers boot."""
+    logger.info("--- STARTING APPLICATION LIFESPAN ---")
+    
+    # 1. DATABASE SETUP (Initialization and Population)
+    try:
+        # These database calls are safe now because the code uses pools and explicit SSL
+        await initialize_db()
+        await populate_initial_keys()
+        logger.info("Database setup and population complete.")
+    except Exception as e:
+        logger.critical(f"FATAL DB ERROR: Cannot initialize resources: {e}")
+        # Raising SystemExit here prevents the application from booting crashed workers
+        raise SystemExit(1)
+    
+    # 2. TELEGRAM WEBHOOK SETUP (Set only once)
+    if BASE_WEBHOOK_URL:
+        full_webhook = BASE_WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
+        logger.info("Attempting to set Telegram webhook...")
+        
+        try:
+            # We explicitly clear any old webhook, then set the new one.
+            await bot(DeleteWebhook(drop_pending_updates=True))
+            await bot(SetWebhook(url=full_webhook))
+            logger.info(f"Webhook successfully set to: {full_webhook}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {e}") 
+
+    # --- YIELD: Application is ready, workers can now start ---
+    yield 
+
+    # --- SHUTDOWN LOGIC (Executed when Uvicorn shuts down) ---
+    logger.info("--- APPLICATION SHUTDOWN: CLEANUP ---")
+    try:
+        await bot.session.close()
+    except Exception:
+        logger.warning("Bot session failed to close.")
+    
+    try:
+        pool = await get_pool()
+        await pool.close()
+    except Exception:
+        pass
+
+
+# 3. Apply the lifespan to the FastAPI application
+app = FastAPI(
+    title="Telegram Bot Webhook (FastAPI + aiogram)", 
+    lifespan=lifespan
+)
+# ... (rest of the handlers go here) ...
+# --- Handlers (Start, Type, Command... remain the same) ---
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
@@ -90,7 +150,7 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         await state.set_state(PurchaseState.waiting_for_command)
 
     key_type_label = "Full Info" if is_full_info else "Info-less"
-
+    
     try:
         available_bins = await find_available_bins(is_full_info)
     except Exception:
@@ -119,7 +179,7 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
     try:
         parts = message.text.split(":", 1)
         command_args = parts[1].strip().split()
-
+        
         key_header = command_args[0]
         quantity = int(command_args[1])
 
@@ -159,72 +219,21 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         await message.answer("❌ An unexpected error occurred. Please try again later.")
 
 
-# --- 5. LIFESPAN (NEW ASGI STARTUP/SHUTDOWN HOOK) ---
-
-async def initialize_db_and_webhook():
-    """Combines DB setup and Webhook setup into one process flow."""
-
-    # 1. DATABASE SETUP (Initialization and Population)
-    await initialize_db()
-    await populate_initial_keys() # Only runs if table is empty
-    logger.info("Database setup and population complete.")
-
-    # 2. TELEGRAM WEBHOOK SETUP (Set only once)
-    if BASE_WEBHOOK_URL:
-        full_webhook = BASE_WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
-        logger.info("Attempting to set Telegram webhook...")
-
-        # We wrap the set_webhook call in a simple try block to handle the expected Flood Control error
-        try:
-            await bot(DeleteWebhook(drop_pending_updates=True))
-            await bot(SetWebhook(url=full_webhook))
-            logger.info(f"Webhook successfully set to: {full_webhook}")
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            # This handles the Flood Control error (TelegramRetryAfter), which is expected from 8 concurrent workers
-            logger.warning(f"Failed to set webhook (Expected during concurrent startup): {e}")
-
-# This is the single lifespan event manager for the application
-@app.on_event("startup")
-async def on_startup():
-    # CRITICAL FIX: Only run setup on the main process to prevent 8 workers fighting
-    if current_process().name == 'MainProcess':
-        await initialize_db_and_webhook()
-    else:
-        # Workers simply wait for the main process to finish setup
-        pass
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    # Only close resources if they were initialized
-    try:
-        await bot.session.close()
-    except Exception:
-        logger.warning("Bot session failed to close.")
-
-    try:
-        pool = await get_pool()
-        await pool.close()
-    except Exception:
-        pass
-
-
+# --- Webhook and Health Check Endpoints ---
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
     try:
         update_data: Dict[str, Any] = await request.json()
         if update_data:
             await dp.feed_update(bot, Update(**update_data))
-
+        
     except Exception:
-        logger.exception(f"CRITICAL WEBHOOK PROCESSING ERROR")
-
+        logger.exception(f"CRITICAL WEBHOOK PROCESSING ERROR") 
+        
     return Response(status_code=200)
 
 @app.get("/")
 def health_check():
     return Response(status_code=200, content="✅ Telegram Bot is up and running via FastAPI.")
 
-
+# --- End of main.py ---
