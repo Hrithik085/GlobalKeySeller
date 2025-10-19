@@ -4,7 +4,7 @@ import logging
 import time 
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
-import functools # NEW IMPORT for thread management
+import functools # CRITICAL NEW IMPORT
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -16,11 +16,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from aiogram.methods import SetWebhook, DeleteWebhook 
+from nowpayments import NOWPayments # <-- NOWPayments SDK
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
 from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count 
-from nowpayments import NOWPayments # <-- NOWPayments SDK
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -58,7 +58,7 @@ FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 FULL_IPN_URL = f"{BASE_WEBHOOK_URL}{PAYMENT_WEBHOOK_PATH}" 
 
 
-# --- 2. FSM States and Keyboards ---
+# --- 2. FSM States and Keyboards (Unchanged) ---
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
@@ -281,8 +281,9 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         await message.answer("❌ An unexpected error occurred. Please try again later.")
 
 # --- HANDLER: INVOICING (Implementation) ---
-async def _async_create_invoice(total_price, user_id, bin_header, quantity):
+async def _run_sync_invoice_creation(total_price, user_id, bin_header, quantity):
     """Synchronous API call run inside a thread."""
+    # This function is executed in a separate thread, allowing us to use synchronous networking
     return nowpayments_client.create_payment(
         price_amount=total_price,
         price_currency=CURRENCY,
@@ -303,11 +304,11 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     loop = asyncio.get_event_loop()
     
     try:
-        # CRITICAL FIX: Run the synchronous API call in a thread pool to prevent blocking
+        # CRITICAL FIX: Run the synchronous API call in a separate thread
         invoice_response = await loop.run_in_executor(
             None, # Use default thread pool
             functools.partial(
-                _async_create_invoice,
+                _run_sync_invoice_creation,
                 total_price=total_price,
                 user_id=user_id,
                 bin_header=bin_header,
