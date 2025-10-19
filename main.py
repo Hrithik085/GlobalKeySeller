@@ -128,17 +128,7 @@ async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]:
 
 # --- 5. ENDPOINTS (Routes must be defined AFTER app = FastAPI) ---
 
-@app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request):
-    try:
-        update_data: Dict[str, Any] = await request.json()
-        if update_data:
-            await dp.feed_update(bot, Update(**update_data))
-        
-    except Exception:
-        logger.exception(f"CRITICAL WEBHOOK PROCESSING ERROR") 
-        
-    return Response(status_code=200)
+
 
 
 
@@ -598,6 +588,17 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    try:
+        update_data: Dict[str, Any] = await request.json()
+        if update_data:
+            await dp.feed_update(bot, Update(**update_data))
+        
+    except Exception:
+        logger.exception(f"CRITICAL WEBHOOK PROCESSING ERROR") 
+        
+    return Response(status_code=200)
 
 # --- WEBHOOK FOR PAYMENT (IPN) ---
 @app.post(PAYMENT_WEBHOOK_PATH)
