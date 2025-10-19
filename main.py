@@ -293,32 +293,98 @@ def _run_sync_invoice_creation(total_price, user_id, bin_header, quantity):
 
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data.startswith("confirm"))
 async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext):
-    
+    """
+    Improved invoice creation flow:
+     - Runs synchronous create_payment in executor
+     - Retries a few times if response lacks a payment URL
+     - Logs the full invoice_response for debugging
+     - Saves invoice_response in state
+     - Never creates an inline button without a url (avoids Telegram Bad Request)
+    """
     data = await state.get_data()
     bin_header = data['bin']
     quantity = data['quantity']
     total_price = data['price']
     user_id = data['user_id']
-    
+
     loop = asyncio.get_event_loop()
-    
-    try:
-        # CRITICAL FIX: Run the synchronous API call in a separate thread
-        invoice_response = await loop.run_in_executor(
-            None, # Use default thread pool
-            functools.partial(
-                _run_sync_invoice_creation,
-                total_price=total_price,
-                user_id=user_id,
-                bin_header=bin_header,
-                quantity=quantity
+
+    # helper to extract a usable payment URL from various provider keys
+    def extract_payment_url(resp: dict) -> str | None:
+        if not isinstance(resp, dict):
+            return None
+        for key in ("invoice_url", "pay_url", "payment_url", "url", "checkout_url", "gateway_url"):
+            val = resp.get(key)
+            if val:
+                return val
+        # some providers nest a links dict/list
+        links = resp.get("links") or resp.get("link") or resp.get("payment_links")
+        if isinstance(links, dict):
+            for v in links.values():
+                if isinstance(v, str) and v.startswith("http"):
+                    return v
+        if isinstance(links, list):
+            for item in links:
+                if isinstance(item, dict):
+                    for v in item.values():
+                        if isinstance(v, str) and v.startswith("http"):
+                            return v
+                if isinstance(item, str) and item.startswith("http"):
+                    return item
+        return None
+
+    # Try to create invoice up to `max_attempts` times if no url returned
+    max_attempts = 3
+    attempt = 0
+    invoice_response = None
+    last_exception = None
+
+    while attempt < max_attempts:
+        attempt += 1
+        try:
+            invoice_response = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    _run_sync_invoice_creation,
+                    total_price=total_price,
+                    user_id=user_id,
+                    bin_header=bin_header,
+                    quantity=quantity
+                )
             )
-        )
+            logger.info(f"NOWPayments create_payment response (attempt {attempt}): {invoice_response}")
+            # save raw response for later analysis
+            await state.update_data(raw_invoice_response=invoice_response)
+            payment_url = extract_payment_url(invoice_response or {})
+            if payment_url:
+                break
+            else:
+                logger.warning(
+                    f"No payment URL in NOWPayments response (attempt {attempt}). "
+                    f"order_id={invoice_response.get('order_id') if isinstance(invoice_response, dict) else 'N/A'}"
+                )
+                # small backoff before retrying
+                await asyncio.sleep(0.8 * attempt)
+        except Exception as exc:
+            last_exception = exc
+            logger.exception(f"NOWPayments create_payment raised exception on attempt {attempt}: {exc}")
+            # small backoff
+            await asyncio.sleep(0.8 * attempt)
+
+    # After loop: check final state
+    try:
+        if not invoice_response:
+            # Totally failed to receive any response
+            logger.error(f"NOWPayments create_payment returned no response after {max_attempts} attempts for user {user_id}")
+            await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
+            await state.clear()
+            await callback.answer()
+            return
+
+        # re-extract final payment_url (could have been set in loop break)
+        payment_url = extract_payment_url(invoice_response or {})
 
         await state.update_data(order_id=invoice_response.get('order_id'), invoice_id=invoice_response.get('pay_id'))
-        await state.set_state(PurchaseState.waiting_for_payment)
-        
-        payment_url = invoice_response.get('invoice_url') or invoice_response.get('pay_url')
 
         final_message = (
             f"🔒 **Invoice Generated!**\n"
@@ -327,7 +393,6 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             f"Order ID: `{invoice_response.get('order_id')}`\n\n"
         )
 
-        # If we have a payment URL, provide a proper inline URL button.
         if payment_url:
             final_message += "Click the button below to complete payment and receive your keys instantly."
             payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -335,27 +400,53 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             ])
             await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode='Markdown')
         else:
-            # Fallback: do NOT create a "text-only" inline button (Telegram rejects this).
-            # Provide invoice/order details and instruct the user how to proceed.
-            invoice_id = invoice_response.get('pay_id') or invoice_response.get('id') or 'N/A'
+            # Attempt to extract an invoice identifier from common keys
+            invoice_id = (
+                invoice_response.get('pay_id')
+                or invoice_response.get('id')
+                or invoice_response.get('payment_id')
+                or invoice_response.get('invoice_id')
+                or 'N/A'
+            )
+
+            support_contact = os.getenv('SUPPORT_CONTACT', 'support@yourdomain.com')
+            logger.warning(
+                "NOWPayments returned invoice without payment URL after retries. "
+                f"order_id={invoice_response.get('order_id')} invoice_id={invoice_id} user_id={user_id}"
+            )
+
             final_message += (
                 "An invoice was generated but the payment link is currently unavailable.\n\n"
                 f"Invoice ID: `{invoice_id}`\n\n"
-                "Please contact support or try again in a moment. If you believe this is an error, provide the Order ID above to support."
+                f"Please contact support ({support_contact}) or try again in a moment. "
+                "If you believe this is an error, provide the Order ID above to support."
             )
-            # Edit message without an inline keyboard
+
+            # edit message WITHOUT inline keyboard to avoid Telegram error
             await callback.message.edit_text(final_message, parse_mode='Markdown')
-        
+
+            # optionally send a follow-up support hint to the user (best-effort)
+            try:
+                await callback.message.answer(
+                    (
+                        "If you need help completing payment, contact our support with the Order ID shown above.\n\n"
+                        f"Support: {support_contact}"
+                    ),
+                    parse_mode='Markdown'
+                )
+            except Exception:
+                logger.debug("Could not send follow-up support message to the user.")
+
     except Exception as e:
-        logger.exception(f"NOWPayments Invoice generation failed for user {user_id}")
-        # Use try/except here as well so we don't fail silently if edit_text raises
+        logger.exception(f"NOWPayments Invoice processing failed for user {user_id}: {e}")
         try:
             await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
         except Exception:
             logger.exception("Failed to send payment error message to user.")
         await state.clear()
-        
+
     await callback.answer()
+
 
 
 # --- FULFILLMENT LOGIC (NEW SECTION) ---
