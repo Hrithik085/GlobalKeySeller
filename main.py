@@ -140,9 +140,7 @@ async def telegram_webhook(request: Request):
         
     return Response(status_code=200)
 
-@app.get("/")
-def health_check():
-    return Response(status_code=200, content="✅ Telegram Bot is up and running via FastAPI.")
+
 
 
 # --- 6. HANDLERS (Application Logic) ---
