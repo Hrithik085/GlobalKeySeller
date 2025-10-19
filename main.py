@@ -614,7 +614,7 @@ async def nowpayments_ipn(request: Request):
             hdr = hdr.split("=", 1)[1]
 
         # 3) compute raw HMAC-SHA512 digest
-        secret = settings.nowpayments_ipn_secret  # must exist in env
+        secret = NOWPAYMENTS_IPN_SECRET  # must exist in env
         digest = hmac.new(secret.encode("utf-8"), msg=payload_bytes, digestmod=hashlib.sha512).digest()
 
         # Prepare encodings to compare
