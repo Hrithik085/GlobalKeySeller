@@ -86,7 +86,8 @@ async def initialize_db():
                 key_header TEXT NOT NULL,
                 quantity INT NOT NULL,
                 is_full_info BOOLEAN NOT NULL,
-                fulfilled BOOLEAN NOT NULL DEFAULT FALSE
+                fulfilled BOOLEAN NOT NULL DEFAULT FALSE,
+                status TEXT DEFAULT 'pending'
             )
         """)
         print("PostgreSQL Database table 'orders' created successfully.")
@@ -178,14 +179,15 @@ async def get_order_from_db(order_id: str):
         return dict(row) if row else None
 
 
-async def save_order(order_id: str, user_id: int, key_header: str, quantity: int, is_full_info: bool):
+async def save_order(order_id: str, user_id: int, key_header: str, quantity: int, is_full_info: bool, status: str = "pending"):
     """Save a new order to the database (called after invoice creation)."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO orders(order_id, user_id, key_header, quantity, is_full_info)
-            VALUES ($1, $2, $3, $4, $5)
-        """, order_id, user_id, key_header, quantity, is_full_info)
+            INSERT INTO orders(order_id, user_id, key_header, quantity, is_full_info, status)
+            VALUES ($1, $2, $3, $4, $5, $6)
+        """, order_id, user_id, key_header, quantity, is_full_info, status)
+
 
 async def mark_order_fulfilled(order_id: str):
     pool = await get_pool()
