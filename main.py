@@ -1,7 +1,7 @@
 import asyncio
 import os
 import logging
-import time # Needed for order ID generation
+import time 
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
 
@@ -18,9 +18,8 @@ from aiogram.methods import SetWebhook, DeleteWebhook
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-# CRITICAL FIX: Ensure ALL database functions are correctly imported here
 from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count 
-from nowpayments import NOWPayments # <-- NOWPayments SDK
+from nowpayments import NOWPayments 
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -325,6 +324,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         await state.clear()
         
     await callback.answer()
+
 
 # --- FULFILLMENT LOGIC (NEW SECTION) ---
 async def get_key_and_mark_sold(bin_header: str, is_full_info: bool, quantity: int) -> List[str]:
