@@ -20,7 +20,7 @@ from nowpayments import NOWPayments
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count 
+from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count, get_key_and_mark_sold, get_order_from_db, save_order 
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -79,49 +79,7 @@ def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardM
     ])
 
 
-# --- 3. LIFESPAN MANAGER (DB & Webhook Setup) ---
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]:
-    """Initializes DB and sets Webhook once before the workers boot."""
-    logger.info("--- STARTING APPLICATION LIFESPAN ---")
-    
-    # 1. DATABASE SETUP 
-    try:
-        await initialize_db()
-        await populate_initial_keys()
-        logger.info("Database setup and population complete.")
-    except Exception as e:
-        logger.critical(f"FATAL DB ERROR: Cannot initialize resources: {e}")
-        raise SystemExit(1)
-    
-    # 2. TELEGRAM WEBHOOK SETUP 
-    if BASE_WEBHOOK_URL:
-        full_webhook = BASE_WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
-        logger.info("Attempting to set Telegram webhook...")
-        
-        try:
-            await bot(DeleteWebhook(drop_pending_updates=True))
-            await bot(SetWebhook(url=full_webhook))
-            logger.info(f"Webhook successfully set to: {full_webhook}")
-        except asyncio.CancelledError:
-            raise 
-        except Exception as e:
-            logger.error(f"Failed to set webhook (Expected during concurrent startup): {e}")
 
-    yield 
-
-    # --- SHUTDOWN LOGIC ---
-    logger.info("--- APPLICATION SHUTDOWN: CLEANUP ---")
-    try:
-        await bot.session.close()
-    except Exception:
-        logger.warning("Bot session failed to close.")
-    
-    try:
-        pool = await get_pool()
-        await pool.close()
-    except Exception:
-        pass
 
 
 
@@ -303,7 +261,6 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             val = resp.get(key)
             if val:
                 return val
-        # some providers nest a links dict/list
         links = resp.get("links") or resp.get("link") or resp.get("payment_links")
         if isinstance(links, dict):
             for v in links.values():
@@ -319,7 +276,6 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
                     return item
         return None
 
-    # Try to create invoice up to `max_attempts` times if no url returned
     max_attempts = 3
     attempt = 0
     invoice_response = None
@@ -339,11 +295,25 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
                 )
             )
             logger.info(f"NOWPayments create_payment response (attempt {attempt}): {invoice_response}")
+
             # save raw response for later analysis
             try:
                 await state.update_data(raw_invoice_response=invoice_response)
             except Exception:
                 logger.debug("Failed to save raw_invoice_response to state.")
+
+            # --- SAVE ORDER IN DATABASE ---
+            try:
+                await save_order(
+                    order_id=invoice_response.get('order_id'),
+                    user_id=user_id,
+                    key_header=bin_header,
+                    quantity=quantity,
+                    is_full_info=data.get('is_full_info', False)
+                )
+                logger.info(f"Order saved successfully for user {user_id}, order_id={invoice_response.get('order_id')}")
+            except Exception:
+                logger.exception("Failed to save order in database")
 
             payment_url = extract_payment_url(invoice_response or {})
             if payment_url:
@@ -353,18 +323,15 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
                     f"No payment URL in NOWPayments response (attempt {attempt}). "
                     f"order_id={invoice_response.get('order_id') if isinstance(invoice_response, dict) else 'N/A'}"
                 )
-                # small backoff before retrying
                 await asyncio.sleep(0.8 * attempt)
         except Exception as exc:
             last_exception = exc
             logger.exception(f"NOWPayments create_payment raised exception on attempt {attempt}: {exc}")
-            # small backoff
             await asyncio.sleep(0.8 * attempt)
 
-    # After loop: check final state
+    # --- rest of your original handler remains unchanged ---
     try:
         if not invoice_response:
-            # Totally failed to receive any response
             logger.error(f"NOWPayments create_payment returned no response after {max_attempts} attempts for user {user_id}")
             try:
                 await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
@@ -374,10 +341,8 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             await callback.answer()
             return
 
-        # re-extract final payment_url (could have been set in loop break)
         payment_url = extract_payment_url(invoice_response or {})
 
-        # Update state with order/invoice identifiers if present
         try:
             await state.update_data(order_id=invoice_response.get('order_id'), invoice_id=invoice_response.get('pay_id') or invoice_response.get('payment_id'))
         except Exception:
@@ -397,7 +362,6 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             ])
             await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode='Markdown')
         else:
-            # Save the raw invoice response (already attempted above) and construct fallback
             invoice_id = (
                 invoice_response.get('pay_id')
                 or invoice_response.get('payment_id')
@@ -422,26 +386,22 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             )
 
             if pay_address and pay_amount:
-                # Provide a callback button which, when tapped, shows the exact payment details (address, amount and network)
                 final_message += (
                     "Tap the button below to view exact payment details (address, amount and network) so you can pay manually.\n\n"
                     f"If you need help, contact support ({support_contact})."
                 )
-                # Use invoice_id (or payment_id) in callback_data so handler can find the right response in state
                 cb_invoice_identifier = invoice_id if invoice_id != 'N/A' else (invoice_response.get('payment_id') or invoice_response.get('pay_id') or 'unknown')
                 payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="Show Payment Details", callback_data=f"show_payment:{cb_invoice_identifier}")]
                 ])
                 await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode='Markdown')
             else:
-                # No usable URL and no low-level payment details — show fallback support message
                 final_message += (
                     f"Please contact support ({support_contact}) or try again in a moment. "
                     "If you believe this is an error, provide the Order ID above to support."
                 )
                 await callback.message.edit_text(final_message, parse_mode='Markdown')
 
-            # Optionally send a private follow-up with support contact (best-effort)
             try:
                 await callback.message.answer(
                     (
@@ -462,6 +422,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         await state.clear()
 
     await callback.answer()
+
 
 
 @router.callback_query(F.data.startswith("show_payment:"))
@@ -508,22 +469,26 @@ async def show_payment_callback(callback: CallbackQuery, state: FSMContext):
 
 
 
-# --- FULFILLMENT LOGIC (NEW SECTION) ---
-async def get_key_and_mark_sold(bin_header: str, is_full_info: bool, quantity: int) -> List[str]:
-    return ["KEY_1_DELIVERED", "KEY_2_DELIVERED"] 
-
 async def fulfill_order(order_id: str):
-    user_id = 123456789 
-    key_type = True
-    bin_header = "456456" 
-    quantity = 1 
+    # Fetch the order from database
+    order = await get_order_from_db(order_id)
+    if not order:
+        logger.error(f"Order {order_id} not found in database.")
+        return
 
-    keys_list = await get_key_and_mark_sold(bin_header, key_type, quantity)
+    user_id = order['user_id']
+    bin_header = order['key_header']
+    quantity = order['quantity']
+    is_full_info = order['is_full_info']
+
+    # Atomically get keys and mark them sold
+    keys_list = await get_key_and_mark_sold(bin_header, is_full_info, quantity)
     
     if keys_list:
+        # Send keys to user
         keys_text = "\n".join(keys_list)
-        
-        await bot.send_message(user_id, 
+        await bot.send_message(
+            user_id, 
             f"✅ **PAYMENT CONFIRMED!** Your order is complete.\n\n"
             f"**Your {quantity} Access Keys:**\n"
             f"```\n{keys_text}\n```\n\n"
