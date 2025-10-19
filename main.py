@@ -2,9 +2,9 @@ import asyncio
 import os
 import logging
 import time 
+import functools 
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
-import functools # Needed for thread management
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -16,7 +16,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from aiogram.methods import SetWebhook, DeleteWebhook 
-from nowpayments import NOWPayments # <-- NOWPayments SDK
+from nowpayments import NOWPayments 
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
@@ -26,17 +26,31 @@ from database import initialize_db, populate_initial_keys, find_available_bins, 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- 1. CORE CLIENT SETUP ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN missing in environment. Set BOT_TOKEN and redeploy.")
     raise RuntimeError("BOT_TOKEN environment variable is required")
 
-# --- 1. CORE CLIENT SETUP ---
-# CRITICAL FIX: We define the client variable globally but do NOT initialize it.
+# NOWPayments Setup
 NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
 NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") 
 
 if not NOWPAYMENTS_API_KEY:
     logger.critical("NOWPAYMENTS_API_KEY is missing. Payment generation will fail.")
+
+# Global variable to hold the synchronous NOWPayments client instance
+NOWPAYMENTS_CLIENT_INSTANCE = None
+
+def get_nowpayments_client():
+    """Lazily initializes and returns the NOWPayments client."""
+    global NOWPAYMENTS_CLIENT_INSTANCE
+    if NOWPAYMENTS_CLIENT_INSTANCE is None:
+        # Check API key before initialization
+        if not NOWPAYMENTS_API_KEY:
+            raise RuntimeError("NOWPAYMENTS_API_KEY is required for client initialization.")
+        NOWPAYMENTS_CLIENT_INSTANCE = NOWPayments(NOWPAYMENTS_API_KEY)
+    return NOWPAYMENTS_CLIENT_INSTANCE
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -46,11 +60,6 @@ bot = Bot(
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
-# nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY) # <- DELETED GLOBAL INIT
-
-# Global variable to hold the initialized synchronous client
-nowpayments_client = None
-
 
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
@@ -85,14 +94,9 @@ def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardM
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]:
     """Initializes DB and sets Webhook once before the workers boot."""
-    global nowpayments_client
     logger.info("--- STARTING APPLICATION LIFESPAN ---")
     
-    # 1. INITIALIZE SYNCHRONOUS CLIENT HERE (SAFE ZONE)
-    nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY)
-    logger.info("NOWPayments Client Initialized.")
-    
-    # 2. DATABASE SETUP 
+    # 1. DATABASE SETUP 
     try:
         await initialize_db()
         await populate_initial_keys()
@@ -101,7 +105,7 @@ async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]:
         logger.critical(f"FATAL DB ERROR: Cannot initialize resources: {e}")
         raise SystemExit(1)
     
-    # 3. TELEGRAM WEBHOOK SETUP 
+    # 2. TELEGRAM WEBHOOK SETUP 
     if BASE_WEBHOOK_URL:
         full_webhook = BASE_WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
         logger.info("Attempting to set Telegram webhook...")
@@ -291,7 +295,7 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
 def _run_sync_invoice_creation(total_price, user_id, bin_header, quantity):
     """Synchronous API call run inside a thread."""
     # This function is executed in a separate thread, allowing us to use synchronous networking
-    return nowpayments_client.create_payment(
+    return get_nowpayments_client().create_payment( # <-- CRITICAL FIX: Get client here!
         price_amount=total_price,
         price_currency=CURRENCY,
         ipn_callback_url=FULL_IPN_URL,
@@ -312,7 +316,6 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     
     try:
         # CRITICAL FIX: Run the synchronous API call in a separate thread
-        # This resolves the TypeError: coroutines cannot be used with run_in_executor()
         invoice_response = await loop.run_in_executor(
             None, # Use default thread pool
             functools.partial(
