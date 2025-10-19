@@ -58,7 +58,7 @@ nowpayments_client = NOWPayments(os.getenv("NOWPAYMENTS_API_KEY"))
 
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
-PAYMENT_WEBHOOK_PATH = "/nowpayments-debug" 
+PAYMENT_WEBHOOK_PATH = "/nowpayments-ipn" 
 BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}")
 FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 FULL_IPN_URL = f"{BASE_WEBHOOK_URL}{PAYMENT_WEBHOOK_PATH}" 
@@ -590,55 +590,119 @@ async def telegram_webhook(request: Request):
     return Response(status_code=200)
 
 
-# @app.post(PAYMENT_WEBHOOK_PATH)
-# async def nowpayments_ipn(request: Request):
-#     try:
-#         # 1️⃣ Read raw payload
-#         payload_bytes = await request.body()
+@app.post(PAYMENT_WEBHOOK_PATH)
+async def nowpayments_ipn(request: Request):
+    try:
+        # 1) read raw payload bytes
+        payload_bytes = await request.body()
 
-#         # 2️⃣ Get signature from header
-#         header_signature = request.headers.get("x-nowpayments-signature")
-#         if not header_signature:
-#             logger.warning("Missing NOWPayments signature header")
-#             return Response(status_code=403)
+        # 2) accept multiple possible header names
+        header_signature = (
+            request.headers.get("x-nowpayments-signature")
+            or request.headers.get("x-nowpayments-hmac")
+            or request.headers.get("x-nowpayments-sig")
+            or request.headers.get("signature")
+        )
 
-#         # 🔹 DEBUG: Log received and computed signatures BEFORE verification
-#         computed_signature = hmac.new(
-#             key=settings.nowpayments_ipn_secret.encode("utf-8"),
-#             msg=payload_bytes,
-#             digestmod=hashlib.sha512
-#         ).hexdigest()
+        if not header_signature:
+            logger.warning("Missing NOWPayments signature header")
+            return Response(status_code=403)
 
-#         logger.info(f"Received signature: {header_signature}")
-#         logger.info(f"Computed signature: {computed_signature}")
+        # Normalize header: strip whitespace and optional prefix like "sha512="
+        hdr = header_signature.strip()
+        if hdr.lower().startswith("sha512="):
+            hdr = hdr.split("=", 1)[1]
 
-#         # 3️⃣ Verify signature
-#         if not hmac.compare_digest(computed_signature, header_signature):
-#             logger.warning("NOWPayments signature mismatch, rejecting IPN")
-#             return Response(status_code=403)
+        # 3) compute raw HMAC-SHA512 digest
+        secret = settings.nowpayments_ipn_secret  # must exist in env
+        digest = hmac.new(secret.encode("utf-8"), msg=payload_bytes, digestmod=hashlib.sha512).digest()
 
-#         # 4️⃣ Parse JSON only after verification
-#         ipn_data = await request.json()
-#         order_id = ipn_data.get("order_id")
-#         payment_status = ipn_data.get("payment_status")
+        # Prepare encodings to compare
+        computed_hex = digest.hex()                  # lowercase hex
+        computed_b64 = base64.b64encode(digest).decode("utf-8")  # standard base64, with padding
 
-#         if not order_id:
-#             logger.warning("Missing order_id in IPN")
-#             return Response(status_code=400)
+        def sig_matches(header_value: str) -> bool:
+            """Return True if header_value matches computed signature in any supported format."""
+            if not header_value:
+                return False
+            h = header_value.strip()
+            # strip prefix if present
+            if h.lower().startswith("sha512="):
+                h = h.split("=", 1)[1]
 
-#         # 5️⃣ Only process confirmed payments
-#         if payment_status == "confirmed":
-#             # Use idempotent fulfill_order
-#             asyncio.create_task(fulfill_order(order_id))
-#             logger.info(f"Payment confirmed for order {order_id}")
-#         else:
-#             logger.info(f"Ignoring payment with status {payment_status} for order {order_id}")
+            # 1) exact base64 match (timing-safe)
+            if hmac.compare_digest(h, computed_b64):
+                return True
+            # 2) base64 without padding
+            if hmac.compare_digest(h.rstrip("="), computed_b64.rstrip("=")):
+                return True
+            # 3) hex match (normalize to lowercase)
+            if hmac.compare_digest(h.lower(), computed_hex):
+                return True
+            return False
 
-#     except Exception as e:
-#         logger.exception(f"Error processing NOWPayments IPN: {e}")
-#         return Response(status_code=500)
+        if not sig_matches(hdr):
+            # optional: log truncated values only
+            logger.warning("NOWPayments signature mismatch. Header (trunc): %s...", hdr[:24])
+            return Response(status_code=403)
 
-#     return Response(status_code=200)
+        # 4) Parse payload robustly (JSON or form-encoded with JSON as key)
+        content_type = request.headers.get("content-type", "")
+        ipn_data = None
+
+        if "application/json" in content_type:
+            ipn_data = json.loads(payload_bytes.decode("utf-8"))
+        elif "application/x-www-form-urlencoded" in content_type:
+            pairs = parse_qsl(payload_bytes.decode("utf-8"), keep_blank_values=True)
+            if not pairs:
+                logger.warning("Form-urlencoded payload contained no fields")
+                return Response(status_code=400)
+            # find the key or value that looks like JSON
+            json_str = None
+            for k, v in pairs:
+                if k.strip().startswith("{"):
+                    json_str = k
+                    break
+                if v.strip().startswith("{"):
+                    json_str = v
+                    break
+            if not json_str:
+                json_str = pairs[0][0]
+            json_str = unquote_plus(json_str)
+            try:
+                ipn_data = json.loads(json_str)
+            except Exception:
+                logger.exception("Failed to parse JSON from form payload")
+                return Response(status_code=400)
+        else:
+            # fallback attempt
+            raw_text = payload_bytes.decode("utf-8", errors="replace")
+            try:
+                ipn_data = json.loads(raw_text)
+            except Exception:
+                logger.warning("Unsupported content-type and payload not JSON")
+                return Response(status_code=400)
+
+        # 5) Validate and process
+        order_id = ipn_data.get("order_id")
+        payment_status = ipn_data.get("payment_status") or ipn_data.get("status")
+
+        if not order_id:
+            logger.warning("Missing order_id in IPN payload")
+            return Response(status_code=400)
+
+        if payment_status in ("confirmed", "finished"):
+            # enqueue background processing — ensure fulfill_order is idempotent
+            asyncio.create_task(fulfill_order(order_id))
+            logger.info("Accepted payment IPN for order %s; background fulfillment queued.", order_id)
+        else:
+            logger.info("Received non-final payment_status '%s' for order %s - ignoring.", payment_status, order_id)
+
+    except Exception as exc:
+        logger.exception("Unhandled exception in nowpayments_ipn: %s", exc)
+        return Response(status_code=500)
+
+    return Response(status_code=200)
 
 @app.post("/nowpayments-debug")
 async def nowpayments_debug(request: Request):
