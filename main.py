@@ -433,9 +433,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
                 "NOWPayments returned invoice without payment URL after retries. "
                 f"order_id={invoice_response.get('order_id')} invoice_id={invoice_id} user_id={user_id}"
             )
-
             final_message += (
-                "An invoice was generated but the payment link is currently unavailable.\n\n"
                 f"Invoice ID: `{invoice_id}`\n\n"
             )
 
