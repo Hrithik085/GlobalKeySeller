@@ -4,7 +4,7 @@ import logging
 import time 
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
-import functools # Needed for thread execution
+import functools
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -16,7 +16,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from aiogram.methods import SetWebhook, DeleteWebhook 
-from nowpayments import NOWPayments # <-- NOWPayments SDK
+from nowpayments import NOWPayments 
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
@@ -26,12 +26,12 @@ from database import initialize_db, populate_initial_keys, find_available_bins, 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- 1. CORE CLIENT SETUP ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN missing in environment. Set BOT_TOKEN and redeploy.")
     raise RuntimeError("BOT_TOKEN environment variable is required")
+
+# --- 1. CORE CLIENT SETUP ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # NOWPayments Setup
 NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
@@ -58,7 +58,7 @@ FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 FULL_IPN_URL = f"{BASE_WEBHOOK_URL}{PAYMENT_WEBHOOK_PATH}" 
 
 
-# --- 2. FSM States and Keyboards (Unchanged) ---
+# --- 2. FSM States and Keyboards ---
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
@@ -283,7 +283,6 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
 # --- HANDLER: INVOICING (Implementation) ---
 def _run_sync_invoice_creation(total_price, user_id, bin_header, quantity):
     """Synchronous API call run inside a thread."""
-    # This function is executed in a separate thread, allowing us to use synchronous networking
     return nowpayments_client.create_payment(
         price_amount=total_price,
         price_currency=CURRENCY,
