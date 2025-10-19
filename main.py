@@ -4,7 +4,7 @@ import logging
 import time 
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
-import functools # CRITICAL IMPORT
+import functools # Needed for thread management
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -16,6 +16,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from aiogram.methods import SetWebhook, DeleteWebhook 
+from nowpayments import NOWPayments # <-- NOWPayments SDK
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
@@ -30,9 +31,7 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is required")
 
 # --- 1. CORE CLIENT SETUP ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-# NOWPayments Setup
+# CRITICAL FIX: We define the client variable globally but do NOT initialize it.
 NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
 NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") 
 
@@ -47,7 +46,11 @@ bot = Bot(
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
-nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY)
+# nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY) # <- DELETED GLOBAL INIT
+
+# Global variable to hold the initialized synchronous client
+nowpayments_client = None
+
 
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
@@ -57,7 +60,7 @@ FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 FULL_IPN_URL = f"{BASE_WEBHOOK_URL}{PAYMENT_WEBHOOK_PATH}" 
 
 
-# --- 2. FSM States and Keyboards ---
+# --- 2. FSM States and Keyboards (Unchanged) ---
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
@@ -82,9 +85,14 @@ def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardM
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]:
     """Initializes DB and sets Webhook once before the workers boot."""
+    global nowpayments_client
     logger.info("--- STARTING APPLICATION LIFESPAN ---")
     
-    # 1. DATABASE SETUP 
+    # 1. INITIALIZE SYNCHRONOUS CLIENT HERE (SAFE ZONE)
+    nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY)
+    logger.info("NOWPayments Client Initialized.")
+    
+    # 2. DATABASE SETUP 
     try:
         await initialize_db()
         await populate_initial_keys()
@@ -93,7 +101,7 @@ async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]:
         logger.critical(f"FATAL DB ERROR: Cannot initialize resources: {e}")
         raise SystemExit(1)
     
-    # 2. TELEGRAM WEBHOOK SETUP 
+    # 3. TELEGRAM WEBHOOK SETUP 
     if BASE_WEBHOOK_URL:
         full_webhook = BASE_WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
         logger.info("Attempting to set Telegram webhook...")
@@ -282,6 +290,7 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
 # --- HANDLER: INVOICING (Implementation) ---
 def _run_sync_invoice_creation(total_price, user_id, bin_header, quantity):
     """Synchronous API call run inside a thread."""
+    # This function is executed in a separate thread, allowing us to use synchronous networking
     return nowpayments_client.create_payment(
         price_amount=total_price,
         price_currency=CURRENCY,
