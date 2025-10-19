@@ -7,7 +7,8 @@ from contextlib import asynccontextmanager
 import functools # CRITICAL IMPORT
 import hmac
 import hashlib
-
+import logging
+import json
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -28,6 +29,7 @@ from database import initialize_db, populate_initial_keys, find_available_bins, 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger = logging.getLogger("nowpayments-debug")
 
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN missing in environment. Set BOT_TOKEN and redeploy.")
@@ -638,7 +640,37 @@ async def nowpayments_ipn(request: Request):
 
     return Response(status_code=200)
 
+@app.post("/nowpayments-debug")
+async def nowpayments_debug(request: Request):
+    try:
+        # raw body (bytes) and short preview
+        body_bytes = await request.body()
+        body_preview = body_bytes.decode("utf-8", errors="replace")[:2000]
 
+        # All headers — FastAPI gives a Headers object which acts like a dict
+        headers = dict(request.headers)
+
+        # Common forwarded headers
+        xff = request.headers.get("x-forwarded-for")
+        xfp = request.headers.get("x-forwarded-proto")
+        host = request.headers.get("host")
+
+        logger.warning("=== NOWPAYMENTS DEBUG MESSAGE ===")
+        logger.warning(f"Remote addr (server sees): {request.client}")
+        logger.warning(f"Host header: {host}")
+        logger.warning(f"X-Forwarded-For: {xff}")
+        logger.warning(f"X-Forwarded-Proto: {xfp}")
+        logger.warning("All headers forwarded to app:")
+        for k, v in headers.items():
+            logger.warning(f"    {k}: {v}")
+        logger.warning(f"Payload preview (up to 2000 chars): {body_preview}")
+        logger.warning("=== END DEBUG MESSAGE ===")
+
+    except Exception as e:
+        logger.exception("Error in nowpayments_debug")
+        return Response(status_code=500)
+
+    return Response(status_code=200)
 
 
 
