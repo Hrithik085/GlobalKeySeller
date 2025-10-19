@@ -1,7 +1,7 @@
 import asyncio
 import os
 import logging
-import time 
+import time # Needed for order ID generation
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
 
@@ -19,7 +19,7 @@ from aiogram.methods import SetWebhook, DeleteWebhook
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
 from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count 
-from nowpayments import NOWPayments 
+from nowpayments import NOWPayments # <-- NOWPayments SDK
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -280,9 +280,10 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         logger.exception("Purchase command failed")
         await message.answer("❌ An unexpected error occurred. Please try again later.")
 
+# --- HANDLER: INVOICING (Implementation) ---
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data.startswith("confirm"))
 async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext):
-    # This is the implementation of the final payment logic
+    
     data = await state.get_data()
     bin_header = data['bin']
     quantity = data['quantity']
@@ -292,28 +293,20 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     order_id = f"ORDER-{user_id}-{bin_header}-{quantity}-{int(time.time())}"
     
     try:
-        # # --- PLACEHOLDER RESPONSE FOR TESTING ---
-        # invoice_response = {
-        #     'invoice_url': f"https://example.com/invoice/{order_id}",
-        #     'id': 'TEST_INV_ID_123'
-        # }
-        # # --- END PLACEHOLDER ---
-
-
         # --- PRODUCTION: Call NOWPayments API to create the invoice ---
-        invoice_response = await nowpayments_client.create_invoice(
-            price_amount=total_price, # Amount user must pay (in USD)
-            price_currency=CURRENCY,  # The currency the amount is specified in (USD)
-            ipn_callback_url=FULL_IPN_URL, # The fulfillment webhook URL
+        invoice_response = await nowpayments_client.create_payment(
+            price_amount=total_price,
+            price_currency=CURRENCY,
+            ipn_callback_url=FULL_IPN_URL,
             order_id=order_id,
-            pay_currency="usdttrc20"  # Currency the user pays with (e.g., USDT TRC20)
+            pay_currency="usdttrc20"
         )
-        # NOTE: The invoice_response will now be the real JSON data from NOWPayments.
+        # --- END PRODUCTION API CALL ---
 
-        await state.update_data(order_id=order_id, invoice_id=invoice_response['id'])
+        await state.update_data(order_id=order_id, invoice_id=invoice_response['pay_id']) # Use pay_id if available
         await state.set_state(PurchaseState.waiting_for_payment)
         
-        payment_url = invoice_response.get('invoice_url')
+        payment_url = invoice_response.get('invoice_url') or invoice_response.get('pay_url') # Check both common keys
         
         final_message = (
             f"🔒 **Invoice Generated!**\n"
@@ -335,7 +328,6 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         await state.clear()
         
     await callback.answer()
-
 
 # --- FULFILLMENT LOGIC (NEW SECTION) ---
 async def get_key_and_mark_sold(bin_header: str, is_full_info: bool, quantity: int) -> List[str]:
