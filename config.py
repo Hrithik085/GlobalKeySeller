@@ -10,7 +10,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")  # e.g. postgres://user:pass@host:5
 # Pricing & currency
 CURRENCY = "USD"
 try:
-    KEY_PRICE_USD = 15.50
+    KEY_PRICE_USD = 15.00
 except ValueError:
     KEY_PRICE_USD = 1.0
 
