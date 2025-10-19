@@ -33,7 +33,7 @@ async def get_pool() -> asyncpg.Pool:
         ssl_ctx = build_ssl_context()
 
         # Parse URL into components for clean parameter passing
-        params = get_raw_connection_params(DATABASE_URL)
+        params = await get_raw_connection_params(DATABASE_URL)
 
         _pool = await asyncpg.create_pool(
             user=params['user'],
@@ -86,7 +86,8 @@ async def add_key(key_detail: str, key_header: str, is_full_info: bool):
             key_detail, key_header, is_full_info
         )
 
-# --- FINAL MISSING FUNCTION ADDED HERE ---
+# --- STOCK CHECK FUNCTIONS ---
+
 async def check_stock_count(key_header: str, is_full_info: bool) -> int:
     """Returns the count of UNSOLD cards for a specific BIN and type."""
     pool = await get_pool()
@@ -96,8 +97,6 @@ async def check_stock_count(key_header: str, is_full_info: bool) -> int:
             WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
         """, key_header, is_full_info)
         return count if count is not None else 0
-# --- END FINAL MISSING FUNCTION ---
-
 
 async def find_available_bins(is_full_info: bool) -> List[str]:
     """Return distinct key_header values for unsold cards of the given type."""
@@ -163,7 +162,7 @@ if __name__ == '__main__':
         if "DATABASE_URL" in str(e):
             print("FATAL ERROR: DATABASE_URL environment variable is required.")
         else:
-            # FIX: The error originated here; ensuring proper indentation and syntax closure.
+            # THIS IS THE BLOCK WITH THE SYNTAX ERROR (NOW FIXED)
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
