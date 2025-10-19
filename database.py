@@ -86,8 +86,6 @@ async def add_key(key_detail: str, key_header: str, is_full_info: bool):
             key_detail, key_header, is_full_info
         )
 
-# --- STOCK CHECK FUNCTIONS ---
-
 async def check_stock_count(key_header: str, is_full_info: bool) -> int:
     """Returns the count of UNSOLD cards for a specific BIN and type."""
     pool = await get_pool()
@@ -97,6 +95,7 @@ async def check_stock_count(key_header: str, is_full_info: bool) -> int:
             WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
         """, key_header, is_full_info)
         return count if count is not None else 0
+
 
 async def find_available_bins(is_full_info: bool) -> List[str]:
     """Return distinct key_header values for unsold cards of the given type."""
@@ -165,4 +164,5 @@ if __name__ == '__main__':
             # THIS IS THE BLOCK WITH THE SYNTAX ERROR (NOW FIXED)
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
+        # This is the line that had the syntax error, now fixed to print the error cleanly.
         print(f"An unexpected error occurred: {e}")
