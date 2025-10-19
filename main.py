@@ -1,6 +1,7 @@
 import asyncio
 import os
 import logging
+import time # Time is needed for order ID generation
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
 
@@ -17,16 +18,27 @@ from aiogram.methods import SetWebhook, DeleteWebhook
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-# CRITICAL FIX: Ensure ALL functions are imported
+# We need to import all necessary database functions
 from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count 
+from nowpayments import NOWPayments # <-- NOWPayments SDK
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- 1. SETUP ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN missing in environment. Set BOT_TOKEN and redeploy.")
     raise RuntimeError("BOT_TOKEN environment variable is required")
+
+# NOWPayments Setup
+NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
+NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") 
+
+if not NOWPAYMENTS_API_KEY:
+    logger.critical("NOWPAYMENTS_API_KEY is missing. Payment generation will fail.")
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -36,11 +48,14 @@ bot = Bot(
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
+nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY)
 
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
+PAYMENT_WEBHOOK_PATH = "/nowpayments-ipn" 
 BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}")
 FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
+FULL_IPN_URL = f"{BASE_WEBHOOK_URL}{PAYMENT_WEBHOOK_PATH}" 
 
 
 # --- 2. FSM States and Keyboards ---
@@ -48,6 +63,7 @@ class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
     waiting_for_confirmation = State() 
+    waiting_for_payment = State()
 
 def get_key_type_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -103,24 +119,21 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     key_type_label = "Full Info" if is_full_info else "Info-less"
     
     try:
-        # Get bins with their counts for display
         bins_with_count = await fetch_bins_with_count(is_full_info)
         available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
     except Exception:
         available_bins_formatted = ["DB ERROR"]
         logger.exception("Failed to fetch available BINs during menu load.")
 
-    # --- COMMAND GUIDE CONTENT (Copy Fix Applied) ---
     command_guide = (
         f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
-        f"**Copy/Send this:**\n"
+        f"**Copy/Send this:**\n" 
         f"```\nget_card_by_header:<BIN> <Quantity>\n```\n"
         f"✨ Example for buying 10 Keys:\n"
         f"**`get_card_by_header:456456 10`**\n\n"
         f"Available BINs in stock: {', '.join(available_bins_formatted) if available_bins_formatted else 'None'}"
     )
-    # --- END COMMAND GUIDE CONTENT ---
 
     await callback.message.edit_text(
         command_guide,
@@ -129,10 +142,8 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         ])
     )
     await callback.answer()
-# --- End of handle_type_selection ---
 
-
-# --- FINAL HANDLER: STOCK CHECK & INVOICE PROMPT ---
+# --- STOCK CHECK & INVOICE PROMPT HANDLER ---
 @router.message(PurchaseState.waiting_for_command, F.text.startswith("get_card_by_header:"))
 async def handle_card_purchase_command(message: Message, state: FSMContext):
     try:
@@ -214,9 +225,6 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     
     # 2. Call NOWPayments API to create the invoice
     try:
-        # NOTE: Placeholder client, but ready to call API
-        # invoice_response = await nowpayments_client.create_invoice(...) 
-        
         # --- PLACEHOLDER RESPONSE FOR TESTING ---
         invoice_response = {
             'invoice_url': f"https://example.com/invoice/{order_id}",
