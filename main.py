@@ -17,37 +17,47 @@ from aiogram.methods import SetWebhook, DeleteWebhook
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-# We import the required database functions, including the new check_stock_count
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count # <-- FETCH BINS WITH COUNT ADDED
+from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count
+from nowpayments import NOWPayments # <-- NEW: NOWPAYMENTS SDK
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- 1. SETUP ---
+# NOTE: BOT_TOKEN is assumed to be read correctly from config.py
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN missing in environment. Set BOT_TOKEN and redeploy.")
     raise RuntimeError("BOT_TOKEN environment variable is required")
 
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode="Markdown")
-)
+# NOWPayments Setup (Keys read from Render Env Vars)
+NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
+NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") # IPN Secret for Webhook verification
 
+if not NOWPAYMENTS_API_KEY:
+    logger.critical("NOWPAYMENTS_API_KEY is missing. Payment generation will fail.")
+
+# Initialize Clients
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
+nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY) # <-- INITIALIZE CLIENT
 
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
+PAYMENT_WEBHOOK_PATH = "/nowpayments-ipn" # New path for payment notifications
 BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}")
 FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
+FULL_IPN_URL = f"{BASE_WEBHOOK_URL}{PAYMENT_WEBHOOK_PATH}" # IPN URL
 
 
 # --- 2. FSM States and Keyboards ---
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
-    waiting_for_confirmation = State() # NEW STATE
+    waiting_for_confirmation = State()
+    waiting_for_payment = State() # NEW STATE
 
 def get_key_type_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -63,8 +73,7 @@ def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardM
     ])
 
 
-# --- 4. HANDLERS (The Core Bot Logic) ---
-
+# --- 3. HANDLERS (The Core Bot Logic) ---
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
@@ -87,16 +96,14 @@ async def start_handler(message: Message, state: FSMContext):
 # --- TYPE SELECTION (Shows Command Guide) ---
 @router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
 @router.callback_query(PurchaseState.waiting_for_command, F.data == "back_to_type") 
-@router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type") # FIX: Allow return from confirmation state
+@router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type")
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     
     if callback.data == "back_to_type":
-        # FIX FOR BACK BUTTON: Call start_handler logic to send the initial menu
         await start_handler(callback.message, state) 
         await callback.answer()
         return
     
-    # --- Standard Selection Flow ---
     is_full_info_str = callback.data.split(":")[1]
     is_full_info = (is_full_info_str == '1')
     await state.update_data(is_full_info=is_full_info)
@@ -105,14 +112,12 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     key_type_label = "Full Info" if is_full_info else "Info-less"
     
     try:
-        # NEW: Fetch bins with their counts
         bins_with_count = await fetch_bins_with_count(is_full_info)
         available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
     except Exception:
         available_bins_formatted = ["DB ERROR"]
         logger.exception("Failed to fetch available BINs during menu load.")
 
-    # --- COMMAND GUIDE CONTENT (Copy Fix Applied) ---
     command_guide = (
         f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
@@ -121,7 +126,6 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         f"**`get_card_by_header:456456 10`**\n\n"
         f"Available BINs in stock: {', '.join(available_bins_formatted) if available_bins_formatted else 'None'}"
     )
-    # --- END COMMAND GUIDE CONTENT ---
 
     await callback.message.edit_text(
         command_guide,
@@ -133,13 +137,12 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
 # --- End of handle_type_selection ---
 
 
-# --- FINAL HANDLER: STOCK CHECK & INVOICE PROMPT ---
+# --- STOCK CHECK & INVOICE PROMPT HANDLER ---
 @router.message(PurchaseState.waiting_for_command, F.text.startswith("get_card_by_header:"))
 async def handle_card_purchase_command(message: Message, state: FSMContext):
     try:
         parts = message.text.split(":", 1)
         
-        # Validation and parsing
         if len(parts) < 2 or not parts[1].strip():
             raise ValueError("Malformed command")
 
@@ -151,16 +154,13 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         
         quantity = int(command_args[1])
         
-        # State check
         data = await state.get_data()
         is_full_info = data.get('is_full_info', False)
         key_type_label = "Full Info" if is_full_info else "Info-less"
 
-        # 1. CHECK STOCK (Using the new function)
         available_stock = await check_stock_count(key_header, is_full_info)
 
         if available_stock < quantity:
-            # 1a. NOT ENOUGH STOCK: Prompt user to re-enter command (stay in waiting_for_command)
             bins_with_count = await fetch_bins_with_count(is_full_info)
             available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
             
@@ -173,17 +173,16 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
             )
             return
 
-        # 2. STOCK AVAILABLE: Store details and prompt for confirmation
         total_price = quantity * KEY_PRICE_USD
-        await state.update_data(bin=key_header, quantity=quantity, price=total_price)
-        await state.set_state(PurchaseState.waiting_for_confirmation) # Move to next state
+        await state.update_data(bin=key_header, quantity=quantity, price=total_price, user_id=message.from_user.id) # Store user_id
+        await state.set_state(PurchaseState.waiting_for_confirmation) 
 
         confirmation_message = (
             f"🛒 **Order Confirmation**\n"
             f"----------------------------------------\n"
             f"Product: {key_type_label} Key (BIN `{key_header}`)\n"
             f"Quantity: {quantity} Keys\n"
-            f"Stock Left: {available_stock - quantity} Keys\n" # Show stock left
+            f"Stock Left: {available_stock - quantity} Keys\n" 
             f"Total Due: **${total_price:.2f} {CURRENCY}**\n"
             f"----------------------------------------\n\n"
             f"✅ Ready to proceed to invoice?"
@@ -196,7 +195,6 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         )
 
     except (IndexError, ValueError):
-        # Handles malformed command syntax
         await message.answer(
             "❌ **Error:** Please use the correct format:\n"
             "Example: `get_card_by_header:456456 10`",
@@ -206,22 +204,117 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         logger.exception("Purchase command failed")
         await message.answer("❌ An unexpected error occurred. Please try again later.")
 
-# --- HANDLER: INVOICING (Placeholder for future payment step) ---
+# --- HANDLER: INVOICING (Implementation) ---
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data.startswith("confirm"))
 async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext):
-    # This is where the NOWPayments invoice creation logic will eventually go.
+    # This is the implementation of the final payment logic
     data = await state.get_data()
+    bin_header = data['bin']
+    quantity = data['quantity']
+    total_price = data['price']
+    user_id = data['user_id']
     
-    final_message = (
-        f"🔒 **INVOICING PENDING**\n"
-        f"Generated Invoice for ${data['price']:.2f} {CURRENCY}...\n"
-        f"*(This is where the user would pay. Flow complete.)*"
-    )
+    # 1. Generate unique order ID
+    order_id = f"ORDER-{user_id}-{bin_header}-{quantity}-{int(time.time())}"
     
-    await callback.message.edit_text(final_message, parse_mode='Markdown')
-    await state.clear()
+    # 2. Call NOWPayments API to create the invoice
+    try:
+        # NOTE: We use USDT as the currency for the invoice
+        invoice_response = await nowpayments_client.create_invoice(
+            amount=total_price,
+            currency=CURRENCY, # Currency the user sees (USD)
+            ipn_callback_url=FULL_IPN_URL,
+            order_id=order_id,
+            pay_currency="usdttrc20" # Currency user pays with (USDT on TRC20)
+        )
+
+        # 3. Store final order details and move to payment state
+        await state.update_data(order_id=order_id, invoice_id=invoice_response['id'])
+        await state.set_state(PurchaseState.waiting_for_payment)
+        
+        # 4. Present payment link to the user
+        payment_url = invoice_response.get('invoice_url')
+        
+        final_message = (
+            f"🔒 **Invoice Generated!**\n"
+            f"Amount: **${total_price:.2f} {CURRENCY}**\n"
+            f"Pay With: USDT (TRC20)\n"
+            f"Order ID: `{order_id}`\n\n"
+            "Click the link below to complete payment and receive your keys instantly."
+        )
+        
+        payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💰 Pay Now", url=payment_url)]
+        ])
+        
+        await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.exception(f"NOWPayments Invoice generation failed for user {user_id}")
+        await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
+        await state.clear()
+        
     await callback.answer()
 
+
+# --- FULFILLMENT LOGIC (NEW SECTION) ---
+# NOTE: This is the critical asynchronous fulfillment routine
+async def get_key_and_mark_sold(bin_header: str, is_full_info: bool, quantity: int) -> List[str]:
+    """
+    Retrieves the specific keys and marks them as SOLD in one atomic transaction.
+    """
+    # NOTE: You must implement this logic in database.py
+    # Placeholder: Assuming the function returns the key details
+    return ["KEY_1_DELIVERED", "KEY_2_DELIVERED"] 
+
+async def fulfill_order(order_id: str):
+    """
+    Called by the IPN webhook when payment is confirmed.
+    Performs the key delivery and inventory update.
+    """
+    # 1. Placeholder values for testing delivery (In production, retrieve these from a temporary order table)
+    user_id = 123456789 # Placeholder ID
+    key_type = True # Placeholder type
+    bin_header = "456456" # Placeholder bin
+    quantity = 1 # Placeholder quantity
+
+    # 2. ATOMIC DB TRANSACTION: Retrieve and Mark as Sold
+    keys_list = await get_key_and_mark_sold(bin_header, key_type, quantity)
+    
+    if keys_list:
+        keys_text = "\n".join(keys_list)
+        
+        await bot.send_message(user_id, 
+            f"✅ **PAYMENT CONFIRMED!** Your order is complete.\n\n"
+            f"**Your {quantity} Access Keys:**\n"
+            f"```\n{keys_text}\n```\n\n"
+            "Thank you for your purchase!",
+            parse_mode='Markdown'
+        )
+        logger.info(f"Order {order_id} fulfilled successfully.")
+    else:
+        logger.error(f"Fulfillment failed for order {order_id}: Stock disappeared.")
+
+# --- WEBHOOK FOR PAYMENT (IPN) ---
+@app.post(PAYMENT_WEBHOOK_PATH)
+async def nowpayments_ipn(request: Request):
+    try:
+        ipn_data = await request.json()
+        
+        # --- IPN Verification (CRITICAL SECURITY) ---
+        # NOTE: You MUST implement signature verification using NOWPAYMENTS_IPN_SECRET here
+        
+        order_status = ipn_data.get('payment_status')
+        order_id = ipn_data.get('order_id')
+        
+        if order_status == 'finished' and order_id:
+            # Payment confirmed, fulfill the order asynchronously
+            asyncio.ensure_future(fulfill_order(order_id))
+            
+    except Exception as e:
+        logger.exception(f"NOWPAYMENTS IPN processing error: {e}") 
+        
+    return Response(status_code=200) # MUST return 200 OK immediately
 
 # --- 5. WEBHOOK/UVICORN INTEGRATION (The Production Standard) ---
 
