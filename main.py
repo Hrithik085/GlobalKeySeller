@@ -1,9 +1,10 @@
 import asyncio
 import os
 import logging
-import time # Needed for order ID generation
+import time 
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
+import functools # NEW IMPORT for thread management
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -15,22 +16,22 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from aiogram.methods import SetWebhook, DeleteWebhook 
-from nowpayments import NOWPayments # <-- NOWPayments SDK
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
 from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count 
+from nowpayments import NOWPayments # <-- NOWPayments SDK
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- 1. CORE CLIENT SETUP ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN missing in environment. Set BOT_TOKEN and redeploy.")
     raise RuntimeError("BOT_TOKEN environment variable is required")
+
+# --- 1. CORE CLIENT SETUP ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # NOWPayments Setup
 NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
@@ -279,6 +280,17 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         logger.exception("Purchase command failed")
         await message.answer("❌ An unexpected error occurred. Please try again later.")
 
+# --- HANDLER: INVOICING (Implementation) ---
+async def _async_create_invoice(total_price, user_id, bin_header, quantity):
+    """Synchronous API call run inside a thread."""
+    return nowpayments_client.create_payment(
+        price_amount=total_price,
+        price_currency=CURRENCY,
+        ipn_callback_url=FULL_IPN_URL,
+        order_id=f"ORDER-{user_id}-{bin_header}-{quantity}-{int(time.time())}",
+        pay_currency="usdttrc20"
+    )
+
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data.startswith("confirm"))
 async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext):
     
@@ -288,29 +300,31 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     total_price = data['price']
     user_id = data['user_id']
     
-    order_id = f"ORDER-{user_id}-{bin_header}-{quantity}-{int(time.time())}"
+    loop = asyncio.get_event_loop()
     
     try:
-        # --- PRODUCTION: Call NOWPayments API to create the invoice ---
-        invoice_response = await nowpayments_client.create_payment(
-            price_amount=total_price,
-            price_currency=CURRENCY,
-            ipn_callback_url=FULL_IPN_URL,
-            order_id=order_id,
-            pay_currency="usdttrc20"
+        # CRITICAL FIX: Run the synchronous API call in a thread pool to prevent blocking
+        invoice_response = await loop.run_in_executor(
+            None, # Use default thread pool
+            functools.partial(
+                _async_create_invoice,
+                total_price=total_price,
+                user_id=user_id,
+                bin_header=bin_header,
+                quantity=quantity
+            )
         )
-        # --- END PRODUCTION API CALL ---
 
-        await state.update_data(order_id=order_id, invoice_id=invoice_response.get('pay_id')) # Use pay_id if available
+        await state.update_data(order_id=invoice_response.get('order_id'), invoice_id=invoice_response.get('pay_id'))
         await state.set_state(PurchaseState.waiting_for_payment)
         
-        payment_url = invoice_response.get('invoice_url') or invoice_response.get('pay_url') # Check both common keys
+        payment_url = invoice_response.get('invoice_url') or invoice_response.get('pay_url')
         
         final_message = (
             f"🔒 **Invoice Generated!**\n"
             f"Amount: **${total_price:.2f} {CURRENCY}**\n"
             f"Pay With: USDT (TRC20)\n"
-            f"Order ID: `{order_id}`\n\n"
+            f"Order ID: `{invoice_response.get('order_id')}`\n\n"
             "Click the link below to complete payment and receive your keys instantly."
         )
         
