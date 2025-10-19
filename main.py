@@ -16,7 +16,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from aiogram.methods import SetWebhook, DeleteWebhook 
-from nowpayments import NOWPayments # <-- NOWPayments SDK
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
