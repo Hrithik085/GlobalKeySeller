@@ -15,11 +15,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from aiogram.methods import SetWebhook, DeleteWebhook 
+from nowpayments import NOWPayments # <-- NOWPayments SDK
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
 from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count 
-from nowpayments import NOWPayments # <-- NOWPayments SDK
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -124,7 +124,6 @@ async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]:
 
 
 # --- 4. APP DEFINITION ---
-# CRITICAL FIX: APP INSTANCE DEFINED HERE, BEFORE ANY DECORATORS USE IT
 app = FastAPI(
     title="Telegram Bot Webhook (FastAPI + aiogram)", 
     lifespan=lifespan
@@ -280,7 +279,6 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         logger.exception("Purchase command failed")
         await message.answer("❌ An unexpected error occurred. Please try again later.")
 
-# --- HANDLER: INVOICING (Implementation) ---
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data.startswith("confirm"))
 async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext):
     
@@ -303,7 +301,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         )
         # --- END PRODUCTION API CALL ---
 
-        await state.update_data(order_id=order_id, invoice_id=invoice_response['pay_id']) # Use pay_id if available
+        await state.update_data(order_id=order_id, invoice_id=invoice_response.get('pay_id')) # Use pay_id if available
         await state.set_state(PurchaseState.waiting_for_payment)
         
         payment_url = invoice_response.get('invoice_url') or invoice_response.get('pay_url') # Check both common keys
