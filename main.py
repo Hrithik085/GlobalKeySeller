@@ -17,7 +17,8 @@ from aiogram.methods import SetWebhook, DeleteWebhook
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count # <-- FETCH BINS WITH COUNT ADDED
+# CRITICAL FIX: Ensure ALL functions are imported
+from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count 
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -46,7 +47,7 @@ FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
-    waiting_for_confirmation = State() # NEW STATE
+    waiting_for_confirmation = State() 
 
 def get_key_type_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -86,11 +87,10 @@ async def start_handler(message: Message, state: FSMContext):
 # --- TYPE SELECTION (Shows Command Guide) ---
 @router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
 @router.callback_query(PurchaseState.waiting_for_command, F.data == "back_to_type") 
-@router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type") # FIX: Allow return from confirmation state
+@router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type")
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     
     if callback.data == "back_to_type":
-        # FIX FOR BACK BUTTON: Call start_handler logic to send the initial menu
         await start_handler(callback.message, state) 
         await callback.answer()
         return
@@ -103,7 +103,7 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     key_type_label = "Full Info" if is_full_info else "Info-less"
     
     try:
-        # NEW: Fetch bins with their counts
+        # Get bins with their counts for display
         bins_with_count = await fetch_bins_with_count(is_full_info)
         available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
     except Exception:
@@ -114,6 +114,7 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     command_guide = (
         f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
+        f"**Copy/Send this:**\n"
         f"```\nget_card_by_header:<BIN> <Quantity>\n```\n"
         f"✨ Example for buying 10 Keys:\n"
         f"**`get_card_by_header:456456 10`**\n\n"
@@ -213,14 +214,15 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     
     # 2. Call NOWPayments API to create the invoice
     try:
-        # NOTE: We use USDT as the currency for the invoice
-        invoice_response = await nowpayments_client.create_invoice(
-            amount=total_price,
-            currency=CURRENCY, # Currency the user sees (USD)
-            ipn_callback_url=FULL_IPN_URL,
-            order_id=order_id,
-            pay_currency="usdttrc20" # Currency user pays with (USDT on TRC20)
-        )
+        # NOTE: Placeholder client, but ready to call API
+        # invoice_response = await nowpayments_client.create_invoice(...) 
+        
+        # --- PLACEHOLDER RESPONSE FOR TESTING ---
+        invoice_response = {
+            'invoice_url': f"https://example.com/invoice/{order_id}",
+            'id': 'TEST_INV_ID_123'
+        }
+        # --- END PLACEHOLDER ---
 
         # 3. Store final order details and move to payment state
         await state.update_data(order_id=order_id, invoice_id=invoice_response['id'])
