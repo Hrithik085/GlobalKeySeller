@@ -600,17 +600,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-@app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request):
-    try:
-        update_data = await request.json()
-        if update_data:
-            await dp.feed_update(bot, Update(**update_data))
-        
-    except Exception:
-        logger.exception(f"CRITICAL WEBHOOK PROCESSING ERROR") 
-        
-    return Response(status_code=200)
+
 # --- WEBHOOK FOR PAYMENT (IPN) ---
 @app.post(PAYMENT_WEBHOOK_PATH)
 async def nowpayments_ipn(request: Request):
