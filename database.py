@@ -210,30 +210,42 @@ async def update_order_status(order_id: str, status: str):
 # --- Population Logic ---
 
 async def populate_initial_keys():
-    """Populate the card_inventory table with sample data (always inserts)."""
-    print("Populating card inventory...")
+    """Populate the card_inventory table with sample keys, some sold and some unsold."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Clear the table first
+        await conn.execute("TRUNCATE TABLE card_inventory RESTART IDENTITY CASCADE")
+        print("Cleared existing card inventory.")
 
-    # Sample Full Info Cards
-    full_info_cards = [
-        "456456xxxxxxxxxx|09/27|123|John Doe|NY",
-        "456456xxxxxxxxxx|08/26|456|Jane Doe|CA",
-        "123123xxxxxxxxxx|07/25|789|Alice Smith|TX",
-        "987654xxxxxxxxxx|10/28|321|Bob Brown|FL"
-    ]
-    for card in full_info_cards:
-        await add_key(card, card.split("|")[0], True)
+        # --- Full Info Keys ---
+        full_info_keys = [
+            ("456456xxxxxxxxxx|09/27|123|John Doe|NY", "456456", True, False),  # available
+            ("456456xxxxxxxxxx|08/26|456|Jane Doe|CA", "456456", True, True),   # sold
+            ("123123xxxxxxxxxx|07/25|789|Alice Smith|TX", "123123", True, False),
+            ("987654xxxxxxxxxx|10/28|321|Bob Brown|FL", "987654", True, True),
+            ("321321xxxxxxxxxx|06/26|654|Charlie Lee|WA", "321321", True, False),
+        ]
 
-    # Sample Info-less Cards
-    info_less_cards = [
-        "543210xxxxxxxxxx|12/25|789",
-        "543210xxxxxxxxxx|11/24|012",
-        "678901xxxxxxxxxx|01/26|345",
-        "345678xxxxxxxxxx|02/27|678"
-    ]
-    for card in info_less_cards:
-        await add_key(card, card.split("|")[0], False)
+        # --- Info-less Keys ---
+        info_less_keys = [
+            ("543210xxxxxxxxxx|12/25|789", "543210", False, False),
+            ("543210xxxxxxxxxx|11/24|012", "543210", False, True),
+            ("678901xxxxxxxxxx|01/26|345", "678901", False, False),
+            ("345678xxxxxxxxxx|02/27|678", "345678", False, True),
+            ("789012xxxxxxxxxx|03/28|901", "789012", False, False),
+        ]
 
-    print("Card inventory population complete.")
+        all_keys = full_info_keys + info_less_keys
+
+        for key_detail, key_header, is_full_info, sold in all_keys:
+            await conn.execute(
+                "INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold) VALUES ($1, $2, $3, $4)",
+                key_detail, key_header, is_full_info, sold
+            )
+
+        print("Card inventory population complete with some sold and some available keys.")
+
+
 
 
 # --- EXECUTABLE BLOCK (For Shell Commands) ---
