@@ -585,7 +585,10 @@ async def nowpayments_ipn(request: Request):
         payload_bytes = await request.body()
         signature = request.headers.get("x-nowpayments-signature")
 
-        # Pass secret explicitly
+        if not signature:
+            logger.warning("Missing NOWPayments IPN signature header")
+            return Response(status_code=403)
+
         if not verify_nowpayments_signature(payload_bytes, signature, NOWPAYMENTS_IPN_SECRET):
             logger.warning("Invalid NOWPayments IPN signature")
             return Response(status_code=403)
@@ -596,12 +599,13 @@ async def nowpayments_ipn(request: Request):
             logger.info(f"Payment not confirmed yet: {ipn_data.get('order_id')}")
             return Response(status_code=200)
 
-        asyncio.ensure_future(fulfill_order(ipn_data.get("order_id")))
+        asyncio.create_task(fulfill_order(ipn_data.get("order_id")))
 
     except Exception as e:
         logger.exception(f"NOWPayments IPN processing error: {e}")
 
     return Response(status_code=200)
+
 
 
 
