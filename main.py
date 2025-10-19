@@ -2,9 +2,9 @@ import asyncio
 import os
 import logging
 import time 
-import functools 
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
+import functools # CRITICAL IMPORT
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -48,7 +48,7 @@ bot = Bot(
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
-nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY)
+nowpayments_client = NOWPayments(os.getenv("NOWPAYMENTS_API_KEY"))
 
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
@@ -304,6 +304,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     
     try:
         # CRITICAL FIX: Run the synchronous API call in a separate thread
+        # This resolves the TypeError: coroutines cannot be used with run_in_executor()
         invoice_response = await loop.run_in_executor(
             None, # Use default thread pool
             functools.partial(
@@ -328,9 +329,9 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             "Click the link below to complete payment and receive your keys instantly."
         )
         
-        # FINAL FIX: Removed the emoji and used plain text for the button
+        # FINAL FIX: The button text must be plain text! (Removing emoji and formatting)
         payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Pay Now", url=payment_url)]
+            [InlineKeyboardButton(text="Pay Now", url=payment_url)] # Removed '💰'
         ])
         
         await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode='Markdown')
