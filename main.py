@@ -600,9 +600,19 @@ async def nowpayments_ipn(request: Request):
             logger.warning("Missing NOWPayments signature header")
             return Response(status_code=403)
 
+        # 🔹 DEBUG: Log received and computed signatures BEFORE verification
+        computed_signature = hmac.new(
+            key=settings.nowpayments_ipn_secret.encode("utf-8"),
+            msg=payload_bytes,
+            digestmod=hashlib.sha512
+        ).hexdigest()
+
+        logger.info(f"Received signature: {header_signature}")
+        logger.info(f"Computed signature: {computed_signature}")
+
         # 3️⃣ Verify signature
-        if not verify_nowpayments_signature(payload_bytes, header_signature, settings.nowpayments_ipn_secret):
-            logger.warning("NOWPayments signature mismatch")
+        if not hmac.compare_digest(computed_signature, header_signature):
+            logger.warning("NOWPayments signature mismatch, rejecting IPN")
             return Response(status_code=403)
 
         # 4️⃣ Parse JSON only after verification
@@ -616,7 +626,7 @@ async def nowpayments_ipn(request: Request):
 
         # 5️⃣ Only process confirmed payments
         if payment_status == "confirmed":
-            # Use idempotent fulfill_order (check if already processed)
+            # Use idempotent fulfill_order
             asyncio.create_task(fulfill_order(order_id))
             logger.info(f"Payment confirmed for order {order_id}")
         else:
@@ -627,6 +637,7 @@ async def nowpayments_ipn(request: Request):
         return Response(status_code=500)
 
     return Response(status_code=200)
+
 
 
 
