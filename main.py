@@ -304,7 +304,6 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     
     try:
         # CRITICAL FIX: Run the synchronous API call in a separate thread
-        # This resolves the TypeError: coroutines cannot be used with run_in_executor()
         invoice_response = await loop.run_in_executor(
             None, # Use default thread pool
             functools.partial(
@@ -320,28 +319,44 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         await state.set_state(PurchaseState.waiting_for_payment)
         
         payment_url = invoice_response.get('invoice_url') or invoice_response.get('pay_url')
-        
+
         final_message = (
             f"🔒 **Invoice Generated!**\n"
             f"Amount: **${total_price:.2f} {CURRENCY}**\n"
             f"Pay With: USDT (TRC20)\n"
             f"Order ID: `{invoice_response.get('order_id')}`\n\n"
-            "Click the link below to complete payment and receive your keys instantly."
         )
-        
-        # FINAL FIX: The button text must be plain text! (Removing emoji and formatting)
-        payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Pay Now", url=payment_url)] # Removed '💰'
-        ])
-        
-        await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode='Markdown')
+
+        # If we have a payment URL, provide a proper inline URL button.
+        if payment_url:
+            final_message += "Click the button below to complete payment and receive your keys instantly."
+            payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Pay Now", url=payment_url)]
+            ])
+            await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode='Markdown')
+        else:
+            # Fallback: do NOT create a "text-only" inline button (Telegram rejects this).
+            # Provide invoice/order details and instruct the user how to proceed.
+            invoice_id = invoice_response.get('pay_id') or invoice_response.get('id') or 'N/A'
+            final_message += (
+                "An invoice was generated but the payment link is currently unavailable.\n\n"
+                f"Invoice ID: `{invoice_id}`\n\n"
+                "Please contact support or try again in a moment. If you believe this is an error, provide the Order ID above to support."
+            )
+            # Edit message without an inline keyboard
+            await callback.message.edit_text(final_message, parse_mode='Markdown')
         
     except Exception as e:
         logger.exception(f"NOWPayments Invoice generation failed for user {user_id}")
-        await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
+        # Use try/except here as well so we don't fail silently if edit_text raises
+        try:
+            await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
+        except Exception:
+            logger.exception("Failed to send payment error message to user.")
         await state.clear()
         
     await callback.answer()
+
 
 # --- FULFILLMENT LOGIC (NEW SECTION) ---
 async def get_key_and_mark_sold(bin_header: str, is_full_info: bool, quantity: int) -> List[str]:
