@@ -86,7 +86,6 @@ async def add_key(key_detail: str, key_header: str, is_full_info: bool):
             key_detail, key_header, is_full_info
         )
 
-# --- FINAL MISSING FUNCTION ADDED HERE ---
 async def check_stock_count(key_header: str, is_full_info: bool) -> int:
     """Returns the count of UNSOLD cards for a specific BIN and type."""
     pool = await get_pool()
@@ -96,8 +95,6 @@ async def check_stock_count(key_header: str, is_full_info: bool) -> int:
             WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
         """, key_header, is_full_info)
         return count if count is not None else 0
-# --- END FINAL MISSING FUNCTION ---
-
 
 async def find_available_bins(is_full_info: bool) -> List[str]:
     """Return distinct key_header values for unsold cards of the given type."""
@@ -108,6 +105,20 @@ async def find_available_bins(is_full_info: bool) -> List[str]:
             is_full_info
         )
         return [r["key_header"] for r in rows]
+
+async def fetch_bins_with_count(is_full_info: bool) -> List[Tuple[str, int]]:
+    """Returns a list of tuples: [(BIN_HEADER, COUNT), ...]."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT key_header, COUNT(key_header) as count
+            FROM card_inventory 
+            WHERE is_full_info = $1 AND sold = FALSE
+            GROUP BY key_header
+            HAVING COUNT(key_header) > 0
+            ORDER BY count DESC
+        """, is_full_info)
+        return [(r["key_header"], r["count"]) for r in rows]
 
 # --- Population Logic ---
 
@@ -150,5 +161,4 @@ if __name__ == '__main__':
         else:
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
-        # FIX: The original syntax error is corrected here.
         print(f"An unexpected error occurred: {e}")
