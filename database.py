@@ -210,23 +210,31 @@ async def update_order_status(order_id: str, status: str):
 # --- Population Logic ---
 
 async def populate_initial_keys():
-    """Populate the card_inventory table with initial sample data if empty."""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        count = await conn.fetchval("SELECT COUNT(*) FROM card_inventory")
+    """Populate the card_inventory table with sample data (always inserts)."""
+    print("Populating card inventory...")
 
-        if count == 0:
-            print("Populating initial card inventory...")
-            # Sample Full Info Cards
-            await add_key("456456xxxxxxxxxx|09/27|123|John Doe|NY", "456456", True)
-            await add_key("456456xxxxxxxxxx|08/26|456|Jane Doe|CA", "456456", True)
+    # Sample Full Info Cards
+    full_info_cards = [
+        "456456xxxxxxxxxx|09/27|123|John Doe|NY",
+        "456456xxxxxxxxxx|08/26|456|Jane Doe|CA",
+        "123123xxxxxxxxxx|07/25|789|Alice Smith|TX",
+        "987654xxxxxxxxxx|10/28|321|Bob Brown|FL"
+    ]
+    for card in full_info_cards:
+        await add_key(card, card.split("|")[0], True)
 
-            # Sample Info-less Cards
-            await add_key("543210xxxxxxxxxx|12/25|789", "543210", False)
-            await add_key("543210xxxxxxxxxx|11/24|012", "543210", False)
-            print("Initial card inventory population complete.")
-        else:
-            print("Inventory already populated. Skipping insertion.")
+    # Sample Info-less Cards
+    info_less_cards = [
+        "543210xxxxxxxxxx|12/25|789",
+        "543210xxxxxxxxxx|11/24|012",
+        "678901xxxxxxxxxx|01/26|345",
+        "345678xxxxxxxxxx|02/27|678"
+    ]
+    for card in info_less_cards:
+        await add_key(card, card.split("|")[0], False)
+
+    print("Card inventory population complete.")
+
 
 # --- EXECUTABLE BLOCK (For Shell Commands) ---
 async def main_setup():
