@@ -5,6 +5,9 @@ import time
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
 import functools # CRITICAL IMPORT
+import hmac
+import hashlib
+
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -20,7 +23,7 @@ from nowpayments import NOWPayments
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count, get_key_and_mark_sold, get_order_from_db, save_order 
+from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count, get_key_and_mark_sold, get_order_from_db, save_order , update_order_status
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -79,7 +82,13 @@ def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardM
     ])
 
 
-
+def verify_nowpayments_signature(ipn_data: dict, signature: str) -> bool:
+    if not signature:
+        return False
+    secret = NOWPAYMENTS_IPN_SECRET.encode()
+    payload = json.dumps(ipn_data, separators=(',', ':'), sort_keys=True).encode()
+    expected_sig = hmac.new(secret, payload, hashlib.sha512).hexdigest()
+    return hmac.compare_digest(expected_sig, signature)
 
 
 
@@ -309,7 +318,8 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
                     user_id=user_id,
                     key_header=bin_header,
                     quantity=quantity,
-                    is_full_info=data.get('is_full_info', False)
+                    is_full_info=data.get('is_full_info', False),
+                    status="pending"
                 )
                 logger.info(f"Order saved successfully for user {user_id}, order_id={invoice_response.get('order_id')}")
             except Exception:
@@ -496,6 +506,10 @@ async def fulfill_order(order_id: str):
             parse_mode='Markdown'
         )
         logger.info(f"Order {order_id} fulfilled successfully.")
+        
+          # ✅ Mark order as paid in DB
+        await update_order_status(order_id, "paid")
+        
     else:
         logger.error(f"Fulfillment failed for order {order_id}: Stock disappeared.")
 
@@ -565,18 +579,35 @@ async def telegram_webhook(request: Request):
         
     return Response(status_code=200)
 
-# --- WEBHOOK FOR PAYMENT (IPN) ---
 @app.post(PAYMENT_WEBHOOK_PATH)
 async def nowpayments_ipn(request: Request):
     try:
         ipn_data = await request.json()
-        if ipn_data:
-            asyncio.ensure_future(fulfill_order(ipn_data.get('order_id')))
-            
+        if not ipn_data:
+            return Response(status_code=400)
+        
+        # 1️⃣ Verify IPN signature
+        signature = request.headers.get("x-nowpayments-signature")
+        if not verify_nowpayments_signature(ipn_data, signature):
+            logger.warning("Invalid NOWPayments IPN signature")
+            return Response(status_code=403)
+        
+        # 2️⃣ Check if payment is complete
+        if ipn_data.get("payment_status") != "confirmed":
+            logger.info(f"Payment not confirmed yet: {ipn_data.get('order_id')}")
+            return Response(status_code=200)  # acknowledge but do not fulfill
+        
+        # 3️⃣ Only now fulfill order
+        asyncio.ensure_future(fulfill_order(ipn_data.get("order_id")))
+        
     except Exception as e:
         logger.exception(f"NOWPAYMENTS IPN processing error: {e}") 
         
     return Response(status_code=200)
+
+
+
+
 @app.get("/")
 def health_check():
     return Response(status_code=200, content="✅ Telegram Bot is up and running via FastAPI.")
