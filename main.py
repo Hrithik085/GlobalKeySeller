@@ -1,7 +1,7 @@
 import asyncio
 import os
 import logging
-import time # Time is needed for order ID generation
+import time
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
 
@@ -18,23 +18,37 @@ from aiogram.methods import SetWebhook, DeleteWebhook
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
+# CRITICAL FIX: All database functions are correctly imported here
 from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count 
-from nowpayments import NOWPayments # <-- NOWPayments SDK
+from nowpayments import NOWPayments 
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- 1. CORE CLIENT SETUP ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN missing in environment. Set BOT_TOKEN and redeploy.")
     raise RuntimeError("BOT_TOKEN environment variable is required")
 
-# --- 1. SETUP ---
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
+# NOWPayments Setup
+NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
+NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") 
+
+if not NOWPAYMENTS_API_KEY:
+    logger.critical("NOWPAYMENTS_API_KEY is missing. Payment generation will fail.")
+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode="Markdown")
+)
+
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
-nowpayments_client = NOWPayments(os.getenv("NOWPAYMENTS_API_KEY"))
+nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY)
 
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
@@ -65,7 +79,78 @@ def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardM
     ])
 
 
-# --- 4. HANDLERS (The Core Bot Logic) ---
+# --- 3. LIFESPAN MANAGER (DB & Webhook Setup) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]:
+    """Initializes DB and sets Webhook once before the workers boot."""
+    logger.info("--- STARTING APPLICATION LIFESPAN ---")
+    
+    # 1. DATABASE SETUP 
+    try:
+        await initialize_db()
+        await populate_initial_keys()
+        logger.info("Database setup and population complete.")
+    except Exception as e:
+        logger.critical(f"FATAL DB ERROR: Cannot initialize resources: {e}")
+        raise SystemExit(1)
+    
+    # 2. TELEGRAM WEBHOOK SETUP 
+    if BASE_WEBHOOK_URL:
+        full_webhook = BASE_WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
+        logger.info("Attempting to set Telegram webhook...")
+        
+        try:
+            await bot(DeleteWebhook(drop_pending_updates=True))
+            await bot(SetWebhook(url=full_webhook))
+            logger.info(f"Webhook successfully set to: {full_webhook}")
+        except asyncio.CancelledError:
+            raise 
+        except Exception as e:
+            logger.error(f"Failed to set webhook (Expected during concurrent startup): {e}")
+
+    yield 
+
+    # --- SHUTDOWN LOGIC ---
+    logger.info("--- APPLICATION SHUTDOWN: CLEANUP ---")
+    try:
+        await bot.session.close()
+    except Exception:
+        logger.warning("Bot session failed to close.")
+    
+    try:
+        pool = await get_pool()
+        await pool.close()
+    except Exception:
+        pass
+
+
+# --- 4. APP DEFINITION ---
+# CRITICAL FIX: APP INSTANCE DEFINED HERE, BEFORE ANY DECORATORS
+app = FastAPI(
+    title="Telegram Bot Webhook (FastAPI + aiogram)", 
+    lifespan=lifespan
+)
+
+# --- 5. ENDPOINTS (Routes must be defined AFTER app = FastAPI) ---
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    try:
+        update_data: Dict[str, Any] = await request.json()
+        if update_data:
+            await dp.feed_update(bot, Update(**update_data))
+        
+    except Exception:
+        logger.exception(f"CRITICAL WEBHOOK PROCESSING ERROR") 
+        
+    return Response(status_code=200)
+
+@app.get("/")
+def health_check():
+    return Response(status_code=200, content="✅ Telegram Bot is up and running via FastAPI.")
+
+
+# --- 6. HANDLERS (Application Logic) ---
 
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
@@ -105,14 +190,12 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     key_type_label = "Full Info" if is_full_info else "Info-less"
     
     try:
-        # Get bins with their counts for display
         bins_with_count = await fetch_bins_with_count(is_full_info)
         available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
     except Exception:
         available_bins_formatted = ["DB ERROR"]
         logger.exception("Failed to fetch available BINs during menu load.")
 
-    # --- COMMAND GUIDE CONTENT (Copy Fix Applied) ---
     command_guide = (
         f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
@@ -122,7 +205,6 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         f"**`get_card_by_header:456456 10`**\n\n"
         f"Available BINs in stock: {', '.join(available_bins_formatted) if available_bins_formatted else 'None'}"
     )
-    # --- END COMMAND GUIDE CONTENT ---
 
     await callback.message.edit_text(
         command_guide,
@@ -199,7 +281,6 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         logger.exception("Purchase command failed")
         await message.answer("❌ An unexpected error occurred. Please try again later.")
 
-# --- HANDLER: INVOICING (Implementation) ---
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data.startswith("confirm"))
 async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext):
     # This is the implementation of the final payment logic
@@ -209,10 +290,8 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     total_price = data['price']
     user_id = data['user_id']
     
-    # 1. Generate unique order ID
     order_id = f"ORDER-{user_id}-{bin_header}-{quantity}-{int(time.time())}"
     
-    # 2. Call NOWPayments API to create the invoice
     try:
         # --- PLACEHOLDER RESPONSE FOR TESTING ---
         invoice_response = {
@@ -221,11 +300,9 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         }
         # --- END PLACEHOLDER ---
 
-        # 3. Store final order details and move to payment state
         await state.update_data(order_id=order_id, invoice_id=invoice_response['id'])
         await state.set_state(PurchaseState.waiting_for_payment)
         
-        # 4. Present payment link to the user
         payment_url = invoice_response.get('invoice_url')
         
         final_message = (
@@ -249,28 +326,16 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         
     await callback.answer()
 
-
-# --- FULFILLMENT LOGIC (NEW SECTION) ---
+# --- FULFILLMENT LOGIC (Placeholder for future use) ---
 async def get_key_and_mark_sold(bin_header: str, is_full_info: bool, quantity: int) -> List[str]:
-    """
-    Retrieves the specific keys and marks them as SOLD in one atomic transaction.
-    """
-    # NOTE: You must implement this logic in database.py
-    # Placeholder: Assuming the function returns the key details
     return ["KEY_1_DELIVERED", "KEY_2_DELIVERED"] 
 
 async def fulfill_order(order_id: str):
-    """
-    Called by the IPN webhook when payment is confirmed.
-    Performs the key delivery and inventory update.
-    """
-    # 1. Placeholder values for testing delivery (In production, retrieve these from a temporary order table)
-    user_id = 123456789 # Placeholder ID
-    key_type = True # Placeholder type
-    bin_header = "456456" # Placeholder bin
-    quantity = 1 # Placeholder quantity
+    user_id = 123456789 
+    key_type = True
+    bin_header = "456456" 
+    quantity = 1 
 
-    # 2. ATOMIC DB TRANSACTION: Retrieve and Mark as Sold
     keys_list = await get_key_and_mark_sold(bin_header, key_type, quantity)
     
     if keys_list:
@@ -290,24 +355,15 @@ async def fulfill_order(order_id: str):
 # --- WEBHOOK FOR PAYMENT (IPN) ---
 @app.post(PAYMENT_WEBHOOK_PATH)
 async def nowpayments_ipn(request: Request):
-    # This handler must be SYNCHRONOUS to avoid conflicts with external services
-    # We delegate the async logic to a safe coroutine.
     try:
         ipn_data = await request.json()
-        
-        # In a real app, you would verify the signature here using NOWPAYMENTS_IPN_SECRET
-        
-        order_status = ipn_data.get('payment_status')
-        order_id = ipn_data.get('order_id')
-        
-        if order_status == 'finished' and order_id:
-            # Payment confirmed, fulfill the order asynchronously
-            asyncio.ensure_future(fulfill_order(order_id))
+        if ipn_data:
+            asyncio.ensure_future(fulfill_order(ipn_data.get('order_id')))
             
     except Exception as e:
         logger.exception(f"NOWPAYMENTS IPN processing error: {e}") 
         
-    return Response(status_code=200) # MUST return 200 OK immediately
+    return Response(status_code=200)
 
 # --- 5. WEBHOOK/UVICORN INTEGRATION (The Production Standard) ---
 
