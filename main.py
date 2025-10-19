@@ -17,47 +17,36 @@ from aiogram.methods import SetWebhook, DeleteWebhook
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count
-from nowpayments import NOWPayments # <-- NEW: NOWPAYMENTS SDK
+from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count # <-- FETCH BINS WITH COUNT ADDED
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- 1. SETUP ---
-# NOTE: BOT_TOKEN is assumed to be read correctly from config.py
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN missing in environment. Set BOT_TOKEN and redeploy.")
     raise RuntimeError("BOT_TOKEN environment variable is required")
 
-# NOWPayments Setup (Keys read from Render Env Vars)
-NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
-NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") # IPN Secret for Webhook verification
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode="Markdown")
+)
 
-if not NOWPAYMENTS_API_KEY:
-    logger.critical("NOWPAYMENTS_API_KEY is missing. Payment generation will fail.")
-
-# Initialize Clients
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
-nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY) # <-- INITIALIZE CLIENT
 
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
-PAYMENT_WEBHOOK_PATH = "/nowpayments-ipn" # New path for payment notifications
 BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}")
 FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
-FULL_IPN_URL = f"{BASE_WEBHOOK_URL}{PAYMENT_WEBHOOK_PATH}" # IPN URL
 
 
 # --- 2. FSM States and Keyboards ---
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
-    waiting_for_confirmation = State()
-    waiting_for_payment = State() # NEW STATE
+    waiting_for_confirmation = State() # NEW STATE
 
 def get_key_type_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -73,7 +62,8 @@ def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardM
     ])
 
 
-# --- 3. HANDLERS (The Core Bot Logic) ---
+# --- 4. HANDLERS (The Core Bot Logic) ---
+
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
@@ -96,10 +86,11 @@ async def start_handler(message: Message, state: FSMContext):
 # --- TYPE SELECTION (Shows Command Guide) ---
 @router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
 @router.callback_query(PurchaseState.waiting_for_command, F.data == "back_to_type") 
-@router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type")
+@router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type") # FIX: Allow return from confirmation state
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     
     if callback.data == "back_to_type":
+        # FIX FOR BACK BUTTON: Call start_handler logic to send the initial menu
         await start_handler(callback.message, state) 
         await callback.answer()
         return
@@ -112,12 +103,14 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     key_type_label = "Full Info" if is_full_info else "Info-less"
     
     try:
+        # NEW: Fetch bins with their counts
         bins_with_count = await fetch_bins_with_count(is_full_info)
         available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
     except Exception:
         available_bins_formatted = ["DB ERROR"]
         logger.exception("Failed to fetch available BINs during menu load.")
 
+    # --- COMMAND GUIDE CONTENT (Copy Fix Applied) ---
     command_guide = (
         f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
@@ -126,6 +119,7 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         f"**`get_card_by_header:456456 10`**\n\n"
         f"Available BINs in stock: {', '.join(available_bins_formatted) if available_bins_formatted else 'None'}"
     )
+    # --- END COMMAND GUIDE CONTENT ---
 
     await callback.message.edit_text(
         command_guide,
@@ -137,7 +131,7 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
 # --- End of handle_type_selection ---
 
 
-# --- STOCK CHECK & INVOICE PROMPT HANDLER ---
+# --- FINAL HANDLER: STOCK CHECK & INVOICE PROMPT ---
 @router.message(PurchaseState.waiting_for_command, F.text.startswith("get_card_by_header:"))
 async def handle_card_purchase_command(message: Message, state: FSMContext):
     try:
@@ -174,7 +168,7 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
             return
 
         total_price = quantity * KEY_PRICE_USD
-        await state.update_data(bin=key_header, quantity=quantity, price=total_price, user_id=message.from_user.id) # Store user_id
+        await state.update_data(bin=key_header, quantity=quantity, price=total_price, user_id=message.from_user.id)
         await state.set_state(PurchaseState.waiting_for_confirmation) 
 
         confirmation_message = (
@@ -258,7 +252,6 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
 
 
 # --- FULFILLMENT LOGIC (NEW SECTION) ---
-# NOTE: This is the critical asynchronous fulfillment routine
 async def get_key_and_mark_sold(bin_header: str, is_full_info: bool, quantity: int) -> List[str]:
     """
     Retrieves the specific keys and marks them as SOLD in one atomic transaction.
@@ -298,11 +291,12 @@ async def fulfill_order(order_id: str):
 # --- WEBHOOK FOR PAYMENT (IPN) ---
 @app.post(PAYMENT_WEBHOOK_PATH)
 async def nowpayments_ipn(request: Request):
+    # This handler must be SYNCHRONOUS to avoid conflicts with external services
+    # We delegate the async logic to a safe coroutine.
     try:
         ipn_data = await request.json()
         
-        # --- IPN Verification (CRITICAL SECURITY) ---
-        # NOTE: You MUST implement signature verification using NOWPAYMENTS_IPN_SECRET here
+        # In a real app, you would verify the signature here using NOWPAYMENTS_IPN_SECRET
         
         order_status = ipn_data.get('payment_status')
         order_id = ipn_data.get('order_id')
