@@ -38,7 +38,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # NOWPayments Setup
 NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
-NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") 
+# NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") 
+NOWPAYMENTS_IPN_SECRET="JObWQY/Qkhtno6+pccOEJO0bC/DTaMwJ"
 
 if not NOWPAYMENTS_API_KEY:
     logger.critical("NOWPAYMENTS_API_KEY is missing. Payment generation will fail.")
