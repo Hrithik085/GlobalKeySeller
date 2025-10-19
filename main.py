@@ -292,12 +292,23 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     order_id = f"ORDER-{user_id}-{bin_header}-{quantity}-{int(time.time())}"
     
     try:
-        # --- PLACEHOLDER RESPONSE FOR TESTING ---
-        invoice_response = {
-            'invoice_url': f"https://example.com/invoice/{order_id}",
-            'id': 'TEST_INV_ID_123'
-        }
-        # --- END PLACEHOLDER ---
+        # # --- PLACEHOLDER RESPONSE FOR TESTING ---
+        # invoice_response = {
+        #     'invoice_url': f"https://example.com/invoice/{order_id}",
+        #     'id': 'TEST_INV_ID_123'
+        # }
+        # # --- END PLACEHOLDER ---
+
+
+        # --- PRODUCTION: Call NOWPayments API to create the invoice ---
+        invoice_response = await nowpayments_client.create_invoice(
+            price_amount=total_price, # Amount user must pay (in USD)
+            price_currency=CURRENCY,  # The currency the amount is specified in (USD)
+            ipn_callback_url=FULL_IPN_URL, # The fulfillment webhook URL
+            order_id=order_id,
+            pay_currency="usdttrc20"  # Currency the user pays with (e.g., USDT TRC20)
+        )
+        # NOTE: The invoice_response will now be the real JSON data from NOWPayments.
 
         await state.update_data(order_id=order_id, invoice_id=invoice_response['id'])
         await state.set_state(PurchaseState.waiting_for_payment)
