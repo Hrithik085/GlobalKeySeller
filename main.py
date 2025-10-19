@@ -18,7 +18,7 @@ from aiogram.methods import SetWebhook, DeleteWebhook
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
 # We import the required database functions, including the new check_stock_count
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count 
+from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count # <-- FETCH BINS WITH COUNT ADDED
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -58,7 +58,6 @@ def get_key_type_keyboard() -> InlineKeyboardMarkup:
 def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardMarkup:
     """Keyboard to confirm order or cancel after stock check."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        # Placeholder for actual invoice button (to be implemented with NOWPayments)
         [InlineKeyboardButton(text="✅ Confirm & Invoice", callback_data=f"confirm:{bin_header}:{quantity}")],
         [InlineKeyboardButton(text="⬅️ Change Command", callback_data="back_to_type")]
     ])
@@ -106,9 +105,11 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     key_type_label = "Full Info" if is_full_info else "Info-less"
     
     try:
-        available_bins = await find_available_bins(is_full_info)
+        # NEW: Fetch bins with their counts
+        bins_with_count = await fetch_bins_with_count(is_full_info)
+        available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
     except Exception:
-        available_bins = ["DB ERROR"]
+        available_bins_formatted = ["DB ERROR"]
         logger.exception("Failed to fetch available BINs during menu load.")
 
     # --- COMMAND GUIDE CONTENT (Copy Fix Applied) ---
@@ -118,7 +119,7 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         f"```\nget_card_by_header:<BIN> <Quantity>\n```\n"
         f"✨ Example for buying 10 Keys:\n"
         f"**`get_card_by_header:456456 10`**\n\n"
-        f"Available BINs in stock: {', '.join(available_bins) if available_bins else 'None'}"
+        f"Available BINs in stock: {', '.join(available_bins_formatted) if available_bins_formatted else 'None'}"
     )
     # --- END COMMAND GUIDE CONTENT ---
 
@@ -160,12 +161,14 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
 
         if available_stock < quantity:
             # 1a. NOT ENOUGH STOCK: Prompt user to re-enter command (stay in waiting_for_command)
-            available_bins = await find_available_bins(is_full_info)
+            bins_with_count = await fetch_bins_with_count(is_full_info)
+            available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
+            
             await message.answer(
                 f"⚠️ **Insufficient Stock!**\n"
                 f"We only have **{available_stock}** {key_type_label} keys for BIN `{key_header}`.\n\n"
                 f"Please re-enter your command with a lower quantity or choose another BIN:\n"
-                f"Available BINs: {', '.join(available_bins)}",
+                f"Available BINs: {', '.join(available_bins_formatted)}",
                 parse_mode='Markdown'
             )
             return
@@ -180,7 +183,7 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
             f"----------------------------------------\n"
             f"Product: {key_type_label} Key (BIN `{key_header}`)\n"
             f"Quantity: {quantity} Keys\n"
-            f"Stock Left: {available_stock - quantity} Keys\n" 
+            f"Stock Left: {available_stock - quantity} Keys\n" # Show stock left
             f"Total Due: **${total_price:.2f} {CURRENCY}**\n"
             f"----------------------------------------\n\n"
             f"✅ Ready to proceed to invoice?"
