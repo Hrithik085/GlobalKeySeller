@@ -196,6 +196,17 @@ async def mark_order_fulfilled(order_id: str):
             WHERE order_id = $1
         """, order_id)
 
+
+async def update_order_status(order_id: str, status: str):
+    """Update the status of an existing order (e.g., 'pending', 'paid', 'failed')."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE orders
+            SET status = $1
+            WHERE order_id = $2
+        """, status, order_id)
+        
 # --- Population Logic ---
 
 async def populate_initial_keys():
