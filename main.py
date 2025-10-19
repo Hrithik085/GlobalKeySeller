@@ -318,23 +318,24 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
 
         await state.update_data(order_id=invoice_response.get('order_id'), invoice_id=invoice_response.get('pay_id'))
         await state.set_state(PurchaseState.waiting_for_payment)
+
+
+
         
-        payment_url = invoice_response.get('invoice_url') or invoice_response.get('pay_url')
-        
-        final_message = (
-            f"🔒 **Invoice Generated!**\n"
-            f"Amount: **${total_price:.2f} {CURRENCY}**\n"
-            f"Pay With: USDT (TRC20)\n"
-            f"Order ID: `{invoice_response.get('order_id')}`\n\n"
-            "Click the link below to complete payment and receive your keys instantly."
-        )
-        
+payment_url = invoice_response.get('invoice_url') or invoice_response.get('pay_url') # Ensure you check both
+
+        # FINAL FIX: Changed text from "💰 Pay Now" to "Pay Now" 
         payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Pay Now", url=payment_url)]
+            [InlineKeyboardButton(text="Pay Now", url=payment_url)] 
         ])
         
+        # We must also ensure the main message itself is correctly formatted
         await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode='Markdown')
-        
+
+
+
+
+    
     except Exception as e:
         logger.exception(f"NOWPayments Invoice generation failed for user {user_id}")
         await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
