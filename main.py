@@ -58,7 +58,7 @@ nowpayments_client = NOWPayments(os.getenv("NOWPAYMENTS_API_KEY"))
 
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
-PAYMENT_WEBHOOK_PATH = "/nowpayments-ipn" 
+PAYMENT_WEBHOOK_PATH = "/nowpayments-debug" 
 BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}")
 FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 FULL_IPN_URL = f"{BASE_WEBHOOK_URL}{PAYMENT_WEBHOOK_PATH}" 
@@ -590,55 +590,55 @@ async def telegram_webhook(request: Request):
     return Response(status_code=200)
 
 
-@app.post(PAYMENT_WEBHOOK_PATH)
-async def nowpayments_ipn(request: Request):
-    try:
-        # 1️⃣ Read raw payload
-        payload_bytes = await request.body()
+# @app.post(PAYMENT_WEBHOOK_PATH)
+# async def nowpayments_ipn(request: Request):
+#     try:
+#         # 1️⃣ Read raw payload
+#         payload_bytes = await request.body()
 
-        # 2️⃣ Get signature from header
-        header_signature = request.headers.get("x-nowpayments-signature")
-        if not header_signature:
-            logger.warning("Missing NOWPayments signature header")
-            return Response(status_code=403)
+#         # 2️⃣ Get signature from header
+#         header_signature = request.headers.get("x-nowpayments-signature")
+#         if not header_signature:
+#             logger.warning("Missing NOWPayments signature header")
+#             return Response(status_code=403)
 
-        # 🔹 DEBUG: Log received and computed signatures BEFORE verification
-        computed_signature = hmac.new(
-            key=settings.nowpayments_ipn_secret.encode("utf-8"),
-            msg=payload_bytes,
-            digestmod=hashlib.sha512
-        ).hexdigest()
+#         # 🔹 DEBUG: Log received and computed signatures BEFORE verification
+#         computed_signature = hmac.new(
+#             key=settings.nowpayments_ipn_secret.encode("utf-8"),
+#             msg=payload_bytes,
+#             digestmod=hashlib.sha512
+#         ).hexdigest()
 
-        logger.info(f"Received signature: {header_signature}")
-        logger.info(f"Computed signature: {computed_signature}")
+#         logger.info(f"Received signature: {header_signature}")
+#         logger.info(f"Computed signature: {computed_signature}")
 
-        # 3️⃣ Verify signature
-        if not hmac.compare_digest(computed_signature, header_signature):
-            logger.warning("NOWPayments signature mismatch, rejecting IPN")
-            return Response(status_code=403)
+#         # 3️⃣ Verify signature
+#         if not hmac.compare_digest(computed_signature, header_signature):
+#             logger.warning("NOWPayments signature mismatch, rejecting IPN")
+#             return Response(status_code=403)
 
-        # 4️⃣ Parse JSON only after verification
-        ipn_data = await request.json()
-        order_id = ipn_data.get("order_id")
-        payment_status = ipn_data.get("payment_status")
+#         # 4️⃣ Parse JSON only after verification
+#         ipn_data = await request.json()
+#         order_id = ipn_data.get("order_id")
+#         payment_status = ipn_data.get("payment_status")
 
-        if not order_id:
-            logger.warning("Missing order_id in IPN")
-            return Response(status_code=400)
+#         if not order_id:
+#             logger.warning("Missing order_id in IPN")
+#             return Response(status_code=400)
 
-        # 5️⃣ Only process confirmed payments
-        if payment_status == "confirmed":
-            # Use idempotent fulfill_order
-            asyncio.create_task(fulfill_order(order_id))
-            logger.info(f"Payment confirmed for order {order_id}")
-        else:
-            logger.info(f"Ignoring payment with status {payment_status} for order {order_id}")
+#         # 5️⃣ Only process confirmed payments
+#         if payment_status == "confirmed":
+#             # Use idempotent fulfill_order
+#             asyncio.create_task(fulfill_order(order_id))
+#             logger.info(f"Payment confirmed for order {order_id}")
+#         else:
+#             logger.info(f"Ignoring payment with status {payment_status} for order {order_id}")
 
-    except Exception as e:
-        logger.exception(f"Error processing NOWPayments IPN: {e}")
-        return Response(status_code=500)
+#     except Exception as e:
+#         logger.exception(f"Error processing NOWPayments IPN: {e}")
+#         return Response(status_code=500)
 
-    return Response(status_code=200)
+#     return Response(status_code=200)
 
 @app.post("/nowpayments-debug")
 async def nowpayments_debug(request: Request):
