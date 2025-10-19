@@ -2,9 +2,9 @@ import asyncio
 import os
 import logging
 import time 
+import functools 
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
-import functools # CRITICAL IMPORT
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -16,7 +16,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from aiogram.methods import SetWebhook, DeleteWebhook 
-from nowpayments import NOWPayments # <-- NOWPayments SDK
+from nowpayments import NOWPayments 
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
@@ -304,7 +304,6 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     
     try:
         # CRITICAL FIX: Run the synchronous API call in a separate thread
-        # This resolves the TypeError: coroutines cannot be used with run_in_executor()
         invoice_response = await loop.run_in_executor(
             None, # Use default thread pool
             functools.partial(
