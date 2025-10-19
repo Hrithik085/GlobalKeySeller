@@ -4,7 +4,7 @@ import logging
 import time 
 from typing import Dict, Any, List, Generator
 from contextlib import asynccontextmanager 
-import functools
+import functools # CRITICAL IMPORT
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -16,7 +16,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from aiogram.methods import SetWebhook, DeleteWebhook 
-from nowpayments import NOWPayments 
+from nowpayments import NOWPayments # <-- NOWPayments SDK
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
