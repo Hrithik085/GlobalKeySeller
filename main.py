@@ -578,26 +578,24 @@ async def telegram_webhook(request: Request):
         
     return Response(status_code=200)
 
+
 @app.post(PAYMENT_WEBHOOK_PATH)
 async def nowpayments_ipn(request: Request):
     try:
-        # 1️⃣ Read raw bytes for signature verification
         payload_bytes = await request.body()
         signature = request.headers.get("x-nowpayments-signature")
 
-        if not verify_nowpayments_signature(payload_bytes, signature):
+        # Pass secret explicitly
+        if not verify_nowpayments_signature(payload_bytes, signature, NOWPAYMENTS_IPN_SECRET):
             logger.warning("Invalid NOWPayments IPN signature")
             return Response(status_code=403)
 
-        # 2️⃣ Parse JSON after verifying signature
         ipn_data = await request.json()
 
-        # 3️⃣ Only act if payment is confirmed
         if ipn_data.get("payment_status") != "confirmed":
             logger.info(f"Payment not confirmed yet: {ipn_data.get('order_id')}")
             return Response(status_code=200)
 
-        # 4️⃣ Fulfill order asynchronously
         asyncio.ensure_future(fulfill_order(ipn_data.get("order_id")))
 
     except Exception as e:
