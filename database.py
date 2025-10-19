@@ -63,9 +63,10 @@ async def get_raw_connection_params(url: str) -> dict:
 # --- Database Schema Functions ---
 
 async def initialize_db():
-    """Create the card_inventory table if it does not exist."""
+    """Create the card_inventory and orders tables if they do not exist."""
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # 1️⃣ Create card_inventory table
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS card_inventory (
                 id SERIAL PRIMARY KEY,
@@ -76,6 +77,20 @@ async def initialize_db():
             )
         """)
         print("PostgreSQL Database table 'card_inventory' created successfully.")
+
+        # 2️⃣ Create orders table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                order_id TEXT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                key_header TEXT NOT NULL,
+                quantity INT NOT NULL,
+                is_full_info BOOLEAN NOT NULL,
+                fulfilled BOOLEAN NOT NULL DEFAULT FALSE
+            )
+        """)
+        print("PostgreSQL Database table 'orders' created successfully.")
+
 
 async def add_key(key_detail: str, key_header: str, is_full_info: bool):
     """Add a single key to the card_inventory table."""
@@ -154,6 +169,32 @@ async def get_key_and_mark_sold(key_header: str, is_full_info: bool, quantity: i
             """, [(id,) for id in key_ids])
             
             return key_details
+
+async def get_order_from_db(order_id: str):
+    """Fetch an order by order_id (used in fulfill_order)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM orders WHERE order_id = $1", order_id)
+        return dict(row) if row else None
+
+
+async def save_order(order_id: str, user_id: int, key_header: str, quantity: int, is_full_info: bool):
+    """Save a new order to the database (called after invoice creation)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO orders(order_id, user_id, key_header, quantity, is_full_info)
+            VALUES ($1, $2, $3, $4, $5)
+        """, order_id, user_id, key_header, quantity, is_full_info)
+
+async def mark_order_fulfilled(order_id: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE orders
+            SET fulfilled = TRUE
+            WHERE order_id = $1
+        """, order_id)
 
 # --- Population Logic ---
 
