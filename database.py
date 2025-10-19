@@ -63,12 +63,14 @@ async def get_raw_connection_params(url: str) -> dict:
 # --- Database Schema Functions ---
 
 async def initialize_db():
-    """Create the card_inventory and orders tables if they do not exist."""
+    """Create or reset the card_inventory and orders tables with correct schema."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # 1️⃣ Create card_inventory table
+        # --- Drop and create card_inventory table ---
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS card_inventory (
+            DROP TABLE IF EXISTS card_inventory;
+
+            CREATE TABLE card_inventory (
                 id SERIAL PRIMARY KEY,
                 key_detail TEXT NOT NULL,
                 key_header TEXT NOT NULL,
@@ -76,11 +78,13 @@ async def initialize_db():
                 sold BOOLEAN NOT NULL DEFAULT FALSE
             )
         """)
-        print("PostgreSQL Database table 'card_inventory' created successfully.")
+        print("PostgreSQL Database table 'card_inventory' created/reset successfully.")
 
-        # 2️⃣ Create orders table
+        # --- Drop and create orders table with status column ---
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
+            DROP TABLE IF EXISTS orders;
+
+            CREATE TABLE orders (
                 order_id TEXT PRIMARY KEY,
                 user_id BIGINT NOT NULL,
                 key_header TEXT NOT NULL,
@@ -90,7 +94,8 @@ async def initialize_db():
                 status TEXT DEFAULT 'pending'
             )
         """)
-        print("PostgreSQL Database table 'orders' created successfully.")
+        print("PostgreSQL Database table 'orders' created/reset successfully.")
+
 
 
 async def add_key(key_detail: str, key_header: str, is_full_info: bool):
