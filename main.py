@@ -124,11 +124,7 @@ async def lifespan(app: FastAPI) -> Generator[Dict[str, Any], None, None]:
         pass
 
 
-# --- 4. APP DEFINITION ---
-app = FastAPI(
-    title="Telegram Bot Webhook (FastAPI + aiogram)", 
-    lifespan=lifespan
-)
+
 
 # --- 5. ENDPOINTS (Routes must be defined AFTER app = FastAPI) ---
 
@@ -550,18 +546,7 @@ async def fulfill_order(order_id: str):
     else:
         logger.error(f"Fulfillment failed for order {order_id}: Stock disappeared.")
 
-# --- WEBHOOK FOR PAYMENT (IPN) ---
-@app.post(PAYMENT_WEBHOOK_PATH)
-async def nowpayments_ipn(request: Request):
-    try:
-        ipn_data = await request.json()
-        if ipn_data:
-            asyncio.ensure_future(fulfill_order(ipn_data.get('order_id')))
-            
-    except Exception as e:
-        logger.exception(f"NOWPAYMENTS IPN processing error: {e}") 
-        
-    return Response(status_code=200)
+
 
 # --- 5. WEBHOOK/UVICORN INTEGRATION (The Production Standard) ---
 
@@ -626,7 +611,18 @@ async def telegram_webhook(request: Request):
         logger.exception(f"CRITICAL WEBHOOK PROCESSING ERROR") 
         
     return Response(status_code=200)
-
+# --- WEBHOOK FOR PAYMENT (IPN) ---
+@app.post(PAYMENT_WEBHOOK_PATH)
+async def nowpayments_ipn(request: Request):
+    try:
+        ipn_data = await request.json()
+        if ipn_data:
+            asyncio.ensure_future(fulfill_order(ipn_data.get('order_id')))
+            
+    except Exception as e:
+        logger.exception(f"NOWPAYMENTS IPN processing error: {e}") 
+        
+    return Response(status_code=200)
 @app.get("/")
 def health_check():
     return Response(status_code=200, content="✅ Telegram Bot is up and running via FastAPI.")
