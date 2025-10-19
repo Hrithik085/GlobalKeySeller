@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional, Tuple # <-- Added Tuple for return type
+from typing import List, Optional, Tuple 
 import asyncio
 import asyncpg
 from urllib.parse import urlparse
@@ -33,7 +33,7 @@ async def get_pool() -> asyncpg.Pool:
         ssl_ctx = build_ssl_context()
 
         # Parse URL into components for clean parameter passing
-        params = await get_raw_connection_params(DATABASE_URL)
+        params = get_raw_connection_params(DATABASE_URL)
 
         _pool = await asyncpg.create_pool(
             user=params['user'],
@@ -86,28 +86,7 @@ async def add_key(key_detail: str, key_header: str, is_full_info: bool):
             key_detail, key_header, is_full_info
         )
 
-# --- NEW FUNCTION: Fetch BINs with Stock Count ---
-async def fetch_bins_with_count(is_full_info: bool) -> List[Tuple[str, int]]:
-    """Returns a list of tuples: [(BIN_HEADER, COUNT), ...]."""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT key_header, COUNT(key_header) as count
-            FROM card_inventory 
-            WHERE is_full_info = $1 AND sold = FALSE
-            GROUP BY key_header
-            HAVING COUNT(key_header) > 0
-            ORDER BY count DESC
-        """, is_full_info)
-        # Returns [('456456', 2), ('111111', 1), ...]
-        return [(r["key_header"], r["count"]) for r in rows]
-
-# --- Existing Functions (Kept for compatibility) ---
-async def find_available_bins(is_full_info: bool) -> List[str]:
-    """Returns only the list of BIN headers (for compatibility)."""
-    bins_with_count = await fetch_bins_with_count(is_full_info)
-    return [bin_header for bin_header, count in bins_with_count]
-
+# --- FINAL MISSING FUNCTION ADDED HERE ---
 async def check_stock_count(key_header: str, is_full_info: bool) -> int:
     """Returns the count of UNSOLD cards for a specific BIN and type."""
     pool = await get_pool()
@@ -117,7 +96,20 @@ async def check_stock_count(key_header: str, is_full_info: bool) -> int:
             WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
         """, key_header, is_full_info)
         return count if count is not None else 0
-# --- Population Logic (Unchanged) ---
+# --- END FINAL MISSING FUNCTION ---
+
+
+async def find_available_bins(is_full_info: bool) -> List[str]:
+    """Return distinct key_header values for unsold cards of the given type."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT key_header FROM card_inventory WHERE is_full_info = $1 AND sold = FALSE",
+            is_full_info
+        )
+        return [r["key_header"] for r in rows]
+
+# --- Population Logic ---
 
 async def populate_initial_keys():
     """Populate the card_inventory table with initial sample data if empty."""
@@ -128,15 +120,12 @@ async def populate_initial_keys():
         if count == 0:
             print("Populating initial card inventory...")
             # Sample Full Info Cards
-            await add_key("456456xxxxxxxxxx|09/27|123|John Doe|NY", "456456", True) 
-            await add_key("456456xxxxxxxxxx|08/26|456|Jane Doe|CA", "456456", True) 
-            
-            await add_key("111111xxxxxxxxxx|01/25|000|Test Name|DE", "111111", True) 
-            
+            await add_key("456456xxxxxxxxxx|09/27|123|John Doe|NY", "456456", True)
+            await add_key("456456xxxxxxxxxx|08/26|456|Jane Doe|CA", "456456", True)
+
             # Sample Info-less Cards
-            await add_key("543210xxxxxxxxxx|12/25|789", "543210", False) 
-            await add_key("543210xxxxxxxxxx|11/24|012", "543210", False) 
-            await add_key("543210xxxxxxxxxx|10/24|345", "543210", False)
+            await add_key("543210xxxxxxxxxx|12/25|789", "543210", False)
+            await add_key("543210xxxxxxxxxx|11/24|012", "543210", False)
             print("Initial card inventory population complete.")
         else:
             print("Inventory already populated. Skipping insertion.")
@@ -161,4 +150,5 @@ if __name__ == '__main__':
         else:
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
+        # FIX: The original syntax error is corrected here.
         print(f"An unexpected error occurred: {e}")
