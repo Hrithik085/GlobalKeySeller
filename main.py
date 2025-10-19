@@ -18,7 +18,6 @@ from aiogram.methods import SetWebhook, DeleteWebhook
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-# We need to import all necessary database functions
 from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count 
 from nowpayments import NOWPayments # <-- NOWPayments SDK
 
@@ -26,29 +25,16 @@ from nowpayments import NOWPayments # <-- NOWPayments SDK
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- 1. SETUP ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN missing in environment. Set BOT_TOKEN and redeploy.")
     raise RuntimeError("BOT_TOKEN environment variable is required")
 
-# NOWPayments Setup
-NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
-NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") 
-
-if not NOWPAYMENTS_API_KEY:
-    logger.critical("NOWPAYMENTS_API_KEY is missing. Payment generation will fail.")
-
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode="Markdown")
-)
-
+# --- 1. SETUP ---
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
-nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY)
+nowpayments_client = NOWPayments(os.getenv("NOWPAYMENTS_API_KEY"))
 
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
@@ -119,21 +105,24 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     key_type_label = "Full Info" if is_full_info else "Info-less"
     
     try:
+        # Get bins with their counts for display
         bins_with_count = await fetch_bins_with_count(is_full_info)
         available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
     except Exception:
         available_bins_formatted = ["DB ERROR"]
         logger.exception("Failed to fetch available BINs during menu load.")
 
+    # --- COMMAND GUIDE CONTENT (Copy Fix Applied) ---
     command_guide = (
         f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
-        f"**Copy/Send this:**\n" 
+        f"**Copy/Send this:**\n"
         f"```\nget_card_by_header:<BIN> <Quantity>\n```\n"
         f"✨ Example for buying 10 Keys:\n"
         f"**`get_card_by_header:456456 10`**\n\n"
         f"Available BINs in stock: {', '.join(available_bins_formatted) if available_bins_formatted else 'None'}"
     )
+    # --- END COMMAND GUIDE CONTENT ---
 
     await callback.message.edit_text(
         command_guide,
