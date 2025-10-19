@@ -39,7 +39,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 # NOWPayments Setup
 NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
 # NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") 
-NOWPAYMENTS_IPN_SECRET="JObWQY/Qkhtno6+pccOEJO0bC/DTaMwJ"
+NOWPAYMENTS_IPN_SECRET="db4pvRZfsKmFsq5c9FJjl61k7HbkW+RQ"
 
 if not NOWPAYMENTS_API_KEY:
     logger.critical("NOWPAYMENTS_API_KEY is missing. Payment generation will fail.")
@@ -84,6 +84,11 @@ def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardM
 
 
 def verify_nowpayments_signature(payload: bytes, header_signature: str, secret: str) -> bool:
+    """
+    Verify NOWPayments IPN signature.
+    """
+    if not header_signature:
+        return False
     computed_signature = hmac.new(
         key=secret.encode('utf-8'),
         msg=payload,
@@ -584,31 +589,29 @@ async def telegram_webhook(request: Request):
 async def nowpayments_ipn(request: Request):
     try:
         payload_bytes = await request.body()
-        signature = request.headers.get("x-nowpayments-signature")
+        header_signature = request.headers.get("x-nowpayments-signature")
 
-        # --- TEMPORARY: skip signature check for testing ---
-        if not signature:
-            logger.warning("Missing NOWPayments IPN signature header (bypassed for testing)")
-            ipn_data = await request.json()
-            asyncio.create_task(fulfill_order(ipn_data.get("order_id")))
-            return Response(status_code=200)
-
-        # Optional: still verify signature if present
-        if not verify_nowpayments_signature(payload_bytes, signature, NOWPAYMENTS_IPN_SECRET):
-            logger.warning("Invalid NOWPayments IPN signature")
+        if not verify_nowpayments_signature(payload_bytes, header_signature, NOWPAYMENTS_IPN_SECRET):
+            logger.warning("Invalid or missing NOWPayments IPN signature")
             return Response(status_code=403)
 
         ipn_data = await request.json()
-        if ipn_data.get("payment_status") != "confirmed":
-            logger.info(f"Payment not confirmed yet: {ipn_data.get('order_id')}")
-            return Response(status_code=200)
+        order_id = ipn_data.get("order_id")
+        payment_status = ipn_data.get("payment_status")
 
-        asyncio.create_task(fulfill_order(ipn_data.get("order_id")))
+        # Only fulfill when payment is confirmed
+        if payment_status == "confirmed":
+            asyncio.create_task(fulfill_order(order_id))
+            logger.info(f"Payment confirmed for order {order_id}")
+        else:
+            logger.info(f"Payment status {payment_status} for order {order_id}, ignoring for now.")
 
     except Exception as e:
         logger.exception(f"NOWPayments IPN processing error: {e}")
+        return Response(status_code=500)
 
     return Response(status_code=200)
+
 
 
 
