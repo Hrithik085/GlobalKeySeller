@@ -48,7 +48,7 @@ bot = Bot(
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
-nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY) # CRITICAL: The global client instance
+nowpayments_client = NOWPayments(NOWPAYMENTS_API_KEY)
 
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
@@ -283,7 +283,6 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
 # --- HANDLER: INVOICING (Implementation) ---
 def _run_sync_invoice_creation(total_price, user_id, bin_header, quantity):
     """Synchronous API call run inside a thread."""
-    # This function is executed in a separate thread, allowing us to use synchronous networking
     return nowpayments_client.create_payment(
         price_amount=total_price,
         price_currency=CURRENCY,
@@ -305,6 +304,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     
     try:
         # CRITICAL FIX: Run the synchronous API call in a separate thread
+        # This resolves the TypeError: coroutines cannot be used with run_in_executor()
         invoice_response = await loop.run_in_executor(
             None, # Use default thread pool
             functools.partial(
@@ -318,24 +318,24 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
 
         await state.update_data(order_id=invoice_response.get('order_id'), invoice_id=invoice_response.get('pay_id'))
         await state.set_state(PurchaseState.waiting_for_payment)
-
-
-
         
-payment_url = invoice_response.get('invoice_url') or invoice_response.get('pay_url') # Ensure you check both
-
-        # FINAL FIX: Changed text from "💰 Pay Now" to "Pay Now" 
+        payment_url = invoice_response.get('invoice_url') or invoice_response.get('pay_url')
+        
+        final_message = (
+            f"🔒 **Invoice Generated!**\n"
+            f"Amount: **${total_price:.2f} {CURRENCY}**\n"
+            f"Pay With: USDT (TRC20)\n"
+            f"Order ID: `{invoice_response.get('order_id')}`\n\n"
+            "Click the link below to complete payment and receive your keys instantly."
+        )
+        
+        # FINAL FIX: Removed the emoji and used plain text for the button
         payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Pay Now", url=payment_url)] 
+            [InlineKeyboardButton(text="Pay Now", url=payment_url)]
         ])
         
-        # We must also ensure the main message itself is correctly formatted
         await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode='Markdown')
-
-
-
-
-    
+        
     except Exception as e:
         logger.exception(f"NOWPayments Invoice generation failed for user {user_id}")
         await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
@@ -437,7 +437,7 @@ app = FastAPI(
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
     try:
-        update_data: Dict[str, Any] = await request.json()
+        update_data = await request.json()
         if update_data:
             await dp.feed_update(bot, Update(**update_data))
         
