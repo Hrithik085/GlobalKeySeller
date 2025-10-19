@@ -121,6 +121,39 @@ async def fetch_bins_with_count(is_full_info: bool) -> List[Tuple[str, int]]:
         """, is_full_info)
         return [(r["key_header"], r["count"]) for r in rows]
 
+# --- NEW: ATOMIC FULFILLMENT FUNCTION ---
+async def get_key_and_mark_sold(key_header: str, is_full_info: bool, quantity: int) -> List[str]:
+    """
+    Atomically retrieves the key details and updates the 'sold' status to TRUE.
+    This function is called upon successful payment confirmation.
+    """
+    pool = await get_pool()
+    
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # 1. Select the IDs and details of the required keys
+            key_records = await conn.fetch("""
+                SELECT id, key_detail
+                FROM card_inventory
+                WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
+                LIMIT $3
+                FOR UPDATE
+            """, key_header, is_full_info, quantity)
+            
+            if len(key_records) < quantity:
+                return [] # Stock disappeared between check and fulfillment
+
+            key_ids = [record['id'] for record in key_records]
+            key_details = [record['key_detail'] for record in key_records]
+
+            # 2. Mark the selected keys as sold
+            await conn.executemany("""
+                UPDATE card_inventory
+                SET sold = TRUE
+                WHERE id = $1
+            """, [(id,) for id in key_ids])
+            
+            return key_details
 
 # --- Population Logic ---
 
@@ -161,8 +194,6 @@ if __name__ == '__main__':
         if "DATABASE_URL" in str(e):
             print("FATAL ERROR: DATABASE_URL environment variable is required.")
         else:
-            # THIS IS THE BLOCK WITH THE SYNTAX ERROR (NOW FIXED)
             print(f"FATAL ERROR during DB setup: {e}")
     except Exception as e:
-        # This is the line that had the syntax error, now fixed to print the error cleanly.
         print(f"An unexpected error occurred: {e}")
