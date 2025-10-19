@@ -82,14 +82,13 @@ def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardM
     ])
 
 
-def verify_nowpayments_signature(ipn_data: dict, signature: str) -> bool:
-    if not signature:
-        return False
-    secret = NOWPAYMENTS_IPN_SECRET.encode()
-    payload = json.dumps(ipn_data, separators=(',', ':'), sort_keys=True).encode()
-    expected_sig = hmac.new(secret, payload, hashlib.sha512).hexdigest()
-    return hmac.compare_digest(expected_sig, signature)
-
+def verify_nowpayments_signature(payload: bytes, header_signature: str, secret: str) -> bool:
+    computed_signature = hmac.new(
+        key=secret.encode('utf-8'),
+        msg=payload,
+        digestmod=hashlib.sha512
+    ).hexdigest()
+    return hmac.compare_digest(computed_signature, header_signature)
 
 
 
@@ -582,29 +581,29 @@ async def telegram_webhook(request: Request):
 @app.post(PAYMENT_WEBHOOK_PATH)
 async def nowpayments_ipn(request: Request):
     try:
-        ipn_data = await request.json()
-        if not ipn_data:
-            return Response(status_code=400)
-        
-        # 1️⃣ Verify IPN signature
+        # 1️⃣ Read raw bytes for signature verification
+        payload_bytes = await request.body()
         signature = request.headers.get("x-nowpayments-signature")
-        if not verify_nowpayments_signature(ipn_data, signature):
+
+        if not verify_nowpayments_signature(payload_bytes, signature):
             logger.warning("Invalid NOWPayments IPN signature")
             return Response(status_code=403)
-        
-        # 2️⃣ Check if payment is complete
+
+        # 2️⃣ Parse JSON after verifying signature
+        ipn_data = await request.json()
+
+        # 3️⃣ Only act if payment is confirmed
         if ipn_data.get("payment_status") != "confirmed":
             logger.info(f"Payment not confirmed yet: {ipn_data.get('order_id')}")
-            return Response(status_code=200)  # acknowledge but do not fulfill
-        
-        # 3️⃣ Only now fulfill order
-        asyncio.ensure_future(fulfill_order(ipn_data.get("order_id")))
-        
-    except Exception as e:
-        logger.exception(f"NOWPAYMENTS IPN processing error: {e}") 
-        
-    return Response(status_code=200)
+            return Response(status_code=200)
 
+        # 4️⃣ Fulfill order asynchronously
+        asyncio.ensure_future(fulfill_order(ipn_data.get("order_id")))
+
+    except Exception as e:
+        logger.exception(f"NOWPayments IPN processing error: {e}")
+
+    return Response(status_code=200)
 
 
 
