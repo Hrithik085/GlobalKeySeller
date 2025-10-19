@@ -300,6 +300,8 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
      - Logs the full invoice_response for debugging
      - Saves invoice_response in state
      - Never creates an inline button without a url (avoids Telegram Bad Request)
+     - If no URL but low-level payment details exist (pay_address + pay_amount),
+       present a safe callback button that reveals those details to the user.
     """
     data = await state.get_data()
     bin_header = data['bin']
@@ -354,7 +356,11 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             )
             logger.info(f"NOWPayments create_payment response (attempt {attempt}): {invoice_response}")
             # save raw response for later analysis
-            await state.update_data(raw_invoice_response=invoice_response)
+            try:
+                await state.update_data(raw_invoice_response=invoice_response)
+            except Exception:
+                logger.debug("Failed to save raw_invoice_response to state.")
+
             payment_url = extract_payment_url(invoice_response or {})
             if payment_url:
                 break
@@ -376,7 +382,10 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         if not invoice_response:
             # Totally failed to receive any response
             logger.error(f"NOWPayments create_payment returned no response after {max_attempts} attempts for user {user_id}")
-            await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
+            try:
+                await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
+            except Exception:
+                logger.exception("Failed to notify user about payment error.")
             await state.clear()
             await callback.answer()
             return
@@ -384,7 +393,11 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         # re-extract final payment_url (could have been set in loop break)
         payment_url = extract_payment_url(invoice_response or {})
 
-        await state.update_data(order_id=invoice_response.get('order_id'), invoice_id=invoice_response.get('pay_id'))
+        # Update state with order/invoice identifiers if present
+        try:
+            await state.update_data(order_id=invoice_response.get('order_id'), invoice_id=invoice_response.get('pay_id') or invoice_response.get('payment_id'))
+        except Exception:
+            logger.debug("Failed to update state with order/invoice ids.")
 
         final_message = (
             f"🔒 **Invoice Generated!**\n"
@@ -400,14 +413,20 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             ])
             await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode='Markdown')
         else:
-            # Attempt to extract an invoice identifier from common keys
+            # Save the raw invoice response (already attempted above) and construct fallback
             invoice_id = (
                 invoice_response.get('pay_id')
-                or invoice_response.get('id')
                 or invoice_response.get('payment_id')
+                or invoice_response.get('payment_id')
+                or invoice_response.get('id')
                 or invoice_response.get('invoice_id')
                 or 'N/A'
             )
+
+            pay_address = invoice_response.get('pay_address') or invoice_response.get('address') or invoice_response.get('wallet_address')
+            pay_amount = invoice_response.get('pay_amount') or invoice_response.get('price_amount') or invoice_response.get('amount')
+            pay_currency = invoice_response.get('pay_currency') or invoice_response.get('price_currency') or 'USD'
+            network = invoice_response.get('network') or invoice_response.get('chain') or 'N/A'
 
             support_contact = os.getenv('SUPPORT_CONTACT', 'support@yourdomain.com')
             logger.warning(
@@ -418,14 +437,29 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             final_message += (
                 "An invoice was generated but the payment link is currently unavailable.\n\n"
                 f"Invoice ID: `{invoice_id}`\n\n"
-                f"Please contact support ({support_contact}) or try again in a moment. "
-                "If you believe this is an error, provide the Order ID above to support."
             )
 
-            # edit message WITHOUT inline keyboard to avoid Telegram error
-            await callback.message.edit_text(final_message, parse_mode='Markdown')
+            if pay_address and pay_amount:
+                # Provide a callback button which, when tapped, shows the exact payment details (address, amount and network)
+                final_message += (
+                    "Tap the button below to view exact payment details (address, amount and network) so you can pay manually.\n\n"
+                    f"If you need help, contact support ({support_contact})."
+                )
+                # Use invoice_id (or payment_id) in callback_data so handler can find the right response in state
+                cb_invoice_identifier = invoice_id if invoice_id != 'N/A' else (invoice_response.get('payment_id') or invoice_response.get('pay_id') or 'unknown')
+                payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Show Payment Details", callback_data=f"show_payment:{cb_invoice_identifier}")]
+                ])
+                await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode='Markdown')
+            else:
+                # No usable URL and no low-level payment details — show fallback support message
+                final_message += (
+                    f"Please contact support ({support_contact}) or try again in a moment. "
+                    "If you believe this is an error, provide the Order ID above to support."
+                )
+                await callback.message.edit_text(final_message, parse_mode='Markdown')
 
-            # optionally send a follow-up support hint to the user (best-effort)
+            # Optionally send a private follow-up with support contact (best-effort)
             try:
                 await callback.message.answer(
                     (
@@ -446,6 +480,49 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         await state.clear()
 
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("show_payment:"))
+async def show_payment_callback(callback: CallbackQuery, state: FSMContext):
+    """
+    Sends the raw payment details returned by NOWPayments to the user so they can pay manually.
+    This avoids creating a URL button when the provider didn't return one.
+    """
+    try:
+        invoice_id = callback.data.split(":", 1)[1]
+    except Exception:
+        invoice_id = "N/A"
+
+    data = await state.get_data()
+    resp = data.get('raw_invoice_response') or {}
+
+    pay_address = resp.get('pay_address') or resp.get('address') or resp.get('wallet_address')
+    pay_amount = resp.get('pay_amount') or resp.get('price_amount') or resp.get('amount')
+    pay_currency = resp.get('pay_currency') or resp.get('price_currency') or 'USD'
+    network = resp.get('network') or resp.get('chain') or 'N/A'
+    payment_id = resp.get('payment_id') or resp.get('pay_id') or resp.get('paymentId') or 'N/A'
+
+    if pay_address and pay_amount:
+        details = (
+            f"📬 **Payment details for Invoice `{invoice_id}`**\n\n"
+            f"• **Amount:** `{pay_amount} {pay_currency}`\n"
+            f"• **Address:** `{pay_address}`\n"
+            f"• **Network:** {network}\n"
+            f"• **Payment ID:** `{payment_id}`\n\n"
+            "Send the exact amount (do not change decimals) to the address above using the specified network (TRC20). "
+            "After sending, the payment will be confirmed automatically via IPN."
+        )
+        # Use answer or message depending on context; message.answer preserves chat context
+        await callback.message.answer(details, parse_mode='Markdown')
+    else:
+        await callback.message.answer(
+            "Sorry — no low-level payment details are available for this invoice. Please contact support with the Order ID shown earlier.",
+            parse_mode='Markdown'
+        )
+
+    # Acknowledge the callback to remove 'loading' UI in Telegram
+    await callback.answer()
+
 
 
 
