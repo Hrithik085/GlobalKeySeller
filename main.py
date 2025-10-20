@@ -98,6 +98,43 @@ def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardM
         [InlineKeyboardButton(text="⬅️ Change Command", callback_data="back_to_type")]
     ])
 
+def _run_sync_get_payment_status(payment_id: Optional[str] = None, order_id: Optional[str] = None):
+    """
+    Uses the NOWPayments client (sync) to fetch payment details.
+    Prefers payment_id, but can also try by order_id if your client supports it.
+    """
+    # Depending on the `nowpayments` client you use, these method names may differ.
+    # Common shapes are: get_payment_status(payment_id=...), or list_payments with filters.
+    if payment_id:
+        return nowpayments_client.get_payment_status(payment_id=payment_id)
+    if order_id:
+        # Some SDKs expose a listing endpoint where you filter by order_id.
+        # If not available, you may need to store payment_id at creation time and use that.
+        return nowpayments_client.list_payments(order_id=order_id)
+    return None
+
+
+def _extract_low_level_payment_details(resp: dict):
+    """
+    Returns (pay_address, pay_amount, pay_currency, network, payment_id) from any NOWPayments response shape.
+    """
+    if not isinstance(resp, dict):
+        return (None, None, None, None, None)
+
+    pay_address = resp.get('pay_address') or resp.get('address') or resp.get('wallet_address')
+    pay_amount  = resp.get('pay_amount')  or resp.get('price_amount') or resp.get('amount')
+    pay_currency = resp.get('pay_currency') or resp.get('price_currency') or 'USD'
+    network = resp.get('network') or resp.get('chain') or resp.get('network_code') or 'N/A'
+    payment_id = resp.get('payment_id') or resp.get('pay_id') or resp.get('id') or resp.get('paymentId')
+
+    # Some SDKs return lists for list endpoints; normalize if needed
+    if (not pay_address or not pay_amount) and isinstance(resp.get('data'), list):
+        for item in resp['data']:
+            pa, pam, pcur, net, pid = _extract_low_level_payment_details(item)
+            if pa and pam:
+                return (pa, pam, pcur, net, pid)
+
+    return (pay_address, pay_amount, pay_currency, network, payment_id)
 
 def verify_nowpayments_signature(payload: bytes, header_signature: str, secret: str) -> bool:
     """
@@ -719,42 +756,97 @@ async def cancel_invoice_callback(callback: CallbackQuery, state: FSMContext):
 async def show_payment_callback(callback: CallbackQuery, state: FSMContext):
     """
     Sends the raw payment details returned by NOWPayments to the user so they can pay manually.
-    This avoids creating a URL button when the provider didn't return one.
+    If not present in cached state, fetch live from NOWPayments using payment_id or order_id.
+    Debounce repeated taps to avoid overlapping fetches.
     """
     try:
         invoice_id = callback.data.split(":", 1)[1]
     except Exception:
         invoice_id = "N/A"
 
+    # Debounce: avoid two concurrent fetches if user double-taps
+    fetching_key = "fetching_payment_details"
     data = await state.get_data()
-    resp = data.get('raw_invoice_response') or {}
+    if data.get(fetching_key):
+        await callback.answer("Fetching payment details…", show_alert=False)
+        return
 
-    pay_address = resp.get('pay_address') or resp.get('address') or resp.get('wallet_address')
-    pay_amount = resp.get('pay_amount') or resp.get('price_amount') or resp.get('amount')
-    pay_currency = resp.get('pay_currency') or resp.get('price_currency') or 'USD'
-    network = resp.get('network') or resp.get('chain') or 'N/A'
-    payment_id = resp.get('payment_id') or resp.get('pay_id') or resp.get('paymentId') or 'N/A'
+    try:
+        await state.update_data(**{fetching_key: True})
 
-    if pay_address and pay_amount:
-        details = (
-            f"📬 **Payment details for Invoice `{invoice_id}`**\n\n"
-            f"• **Amount:** `{pay_amount} {pay_currency}`\n"
-            f"• **Address:** `{pay_address}`\n"
-            f"• **Network:** {network}\n"
-            f"• **Payment ID:** `{payment_id}`\n\n"
-            "Send the exact amount (do not change decimals) to the address above using the specified network (TRC20). "
-            "After sending, the payment will be confirmed automatically via IPN."
-        )
-        # Use answer or message depending on context; message.answer preserves chat context
-        await callback.message.answer(details, parse_mode='Markdown')
-    else:
-        await callback.message.answer(
-            "Sorry — no low-level payment details are available for this invoice. Please contact support with the Order ID shown earlier.",
-            parse_mode='Markdown'
-        )
+        # Prefer cached response first
+        resp = data.get('raw_invoice_response') or {}
+        order_id = data.get('order_id') or resp.get('order_id')
+        payment_id = data.get('invoice_id') or data.get('payment_id') \
+                     or resp.get('pay_id') or resp.get('payment_id') or resp.get('id')
 
-    # Acknowledge the callback to remove 'loading' UI in Telegram
-    await callback.answer()
+        pay_address, pay_amount, pay_currency, network, resolved_payment_id = _extract_low_level_payment_details(resp)
+
+        # If cached response is missing details, fetch from NOWPayments with brief retries
+        if not (pay_address and pay_amount):
+            loop = asyncio.get_event_loop()
+            tries = 0
+            last_exc = None
+            while tries < 3:
+                tries += 1
+                try:
+                    fetched = await loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            _run_sync_get_payment_status,
+                            payment_id=payment_id,
+                            order_id=order_id
+                        )
+                    )
+                    pay_address, pay_amount, pay_currency, network, resolved_payment_id = _extract_low_level_payment_details(fetched or {})
+                    if pay_address and pay_amount:
+                        # cache for subsequent taps
+                        new_raw = resp.copy() if isinstance(resp, dict) else {}
+                        if isinstance(fetched, dict):
+                            new_raw.update(fetched)
+                        await state.update_data(raw_invoice_response=new_raw)
+                        break
+                except Exception as e:
+                    last_exc = e
+                # tiny backoff
+                await asyncio.sleep(0.5 * tries)
+
+        if pay_address and pay_amount:
+            details = (
+                f"📬 **Payment details for Invoice `{invoice_id}`**\n\n"
+                f"• **Amount:** `{pay_amount} {pay_currency}`\n"
+                f"• **Address:** `{pay_address}`\n"
+                f"• **Network:** {network}\n"
+                f"• **Payment ID:** `{resolved_payment_id or (payment_id or 'N/A')}`\n\n"
+                "Send the exact amount (do not change decimals) to the address above using the specified network (TRC20). "
+                "After sending, the payment will be confirmed automatically via IPN."
+            )
+            await callback.message.answer(details, parse_mode='Markdown')
+        else:
+            await callback.message.answer(
+                "Sorry — we couldn’t retrieve low-level payment details yet. Please try again in a moment or contact support with your Order ID.",
+                parse_mode='Markdown'
+            )
+
+        await callback.answer()
+
+    except Exception:
+        logger.exception("show_payment_callback failed")
+        try:
+            await callback.message.answer(
+                "An error occurred while fetching payment details. Please try again.",
+                parse_mode='Markdown'
+            )
+            await callback.answer()
+        except Exception:
+            pass
+    finally:
+        # Clear debounce flag
+        try:
+            await state.update_data(**{fetching_key: False})
+        except Exception:
+            pass
+
 
 
 
