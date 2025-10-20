@@ -32,7 +32,7 @@ try:
     from config import KEY_PRICE_INFOLESS, KEY_PRICE_FULL
 except Exception:
     KEY_PRICE_INFOLESS = KEY_PRICE_USD
-    KEY_PRICE_FULL = KEY_PRICE_US
+    KEY_PRICE_FULL = KEY_PRICE_USD
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
