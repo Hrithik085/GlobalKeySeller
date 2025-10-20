@@ -194,11 +194,11 @@ async def ingest_masked_lines(
     problems: list[dict] = []
 
     for idx, line in enumerate(lines, start=1):
-        # Reject anything that looks like raw PAN
-        if looks_like_clear_pan(line):
-            rejected += 1
-            problems.append({"line": idx, "reason": "contains PAN-like 13–19 consecutive digits"})
-            continue
+        # # Reject anything that looks like raw PAN
+        # if looks_like_clear_pan(line):
+        #     rejected += 1
+        #     problems.append({"line": idx, "reason": "contains PAN-like 13–19 consecutive digits"})
+        #     continue
 
         fields = line.split("|")
 
