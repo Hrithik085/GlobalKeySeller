@@ -187,18 +187,18 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
 async def handle_card_purchase_command(message: Message, state: FSMContext):
     try:
         parts = message.text.split(":", 1)
-        
+
         if len(parts) < 2 or not parts[1].strip():
             raise ValueError("Malformed command")
 
         command_args = parts[1].strip().split()
         key_header = command_args[0]
-        
+
         if len(command_args) < 2:
             raise ValueError("Quantity missing")
-        
+
         quantity = int(command_args[1])
-        
+
         data = await state.get_data()
         is_full_info = data.get('is_full_info', False)
         key_type_label = "Full Info" if is_full_info else "Info-less"
@@ -208,7 +208,7 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         if available_stock < quantity:
             bins_with_count = await fetch_bins_with_count(is_full_info)
             available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
-            
+
             await message.answer(
                 f"⚠️ **Insufficient Stock!**\n"
                 f"We only have **{available_stock}** {key_type_label} keys for BIN `{key_header}`.\n\n"
@@ -218,33 +218,32 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
             )
             return
 
-# choose unit price based on key type
-unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
-total_price = quantity * unit_price
+        # --- pricing: choose unit price based on key type (inside try) ---
+        unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
+        total_price = quantity * unit_price
 
-# store both unit_price and total price in state for later invoice generation
-await state.update_data(
-    bin=key_header,
-    quantity=quantity,
-    price=total_price,
-    unit_price=unit_price,
-    user_id=message.from_user.id
-)
+        # store both unit_price and total price in state for later invoice generation
+        await state.update_data(
+            bin=key_header,
+            quantity=quantity,
+            price=total_price,
+            unit_price=unit_price,
+            user_id=message.from_user.id
+        )
 
-        await state.set_state(PurchaseState.waiting_for_confirmation) 
+        await state.set_state(PurchaseState.waiting_for_confirmation)
 
-confirmation_message = (
-    f"🛒 **Order Confirmation**\n"
-    f"----------------------------------------\n"
-    f"Product: {key_type_label} Key (BIN `{key_header}`)\n"
-    f"Quantity: {quantity} Keys\n"
-    f"Unit price: **${unit_price:.2f} {CURRENCY}**\n"
-    f"Total Due: **${total_price:.2f} {CURRENCY}**\n"
-    f"Stock Left: {available_stock - quantity} Keys\n"
-    f"----------------------------------------\n\n"
-    f"✅ Ready to proceed to invoice?"
-)
-
+        confirmation_message = (
+            f"🛒 **Order Confirmation**\n"
+            f"----------------------------------------\n"
+            f"Product: {key_type_label} Key (BIN `{key_header}`)\n"
+            f"Quantity: {quantity} Keys\n"
+            f"Unit price: **${unit_price:.2f} {CURRENCY}**\n"
+            f"Total Due: **${total_price:.2f} {CURRENCY}**\n"
+            f"Stock Left: {available_stock - quantity} Keys\n"
+            f"----------------------------------------\n\n"
+            f"✅ Ready to proceed to invoice?"
+        )
 
         await message.answer(
             confirmation_message,
