@@ -24,6 +24,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.methods import SetWebhook, DeleteWebhook 
 from nowpayments import NOWPayments 
 
+
+
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
 from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count, get_key_and_mark_sold, get_order_from_db, save_order , update_order_status
@@ -50,6 +52,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
 # NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") 
 NOWPAYMENTS_IPN_SECRET="db4pvRZfsKmFsq5c9FJjl61k7HbkW+RQ"
+MINIMUM_USD = float(os.getenv("MINIMUM_USD", "10.0"))
+
 
 if not NOWPAYMENTS_API_KEY:
     logger.critical("NOWPAYMENTS_API_KEY is missing. Payment generation will fail.")
@@ -275,20 +279,60 @@ def _run_sync_invoice_creation(total_price, user_id, bin_header, quantity):
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data.startswith("confirm"))
 async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext):
     """
-    Improved invoice creation flow:
-     - Runs synchronous create_payment in executor
-     - Retries a few times if response lacks a payment URL
-     - Logs the full invoice_response for debugging
-     - Saves invoice_response in state
-     - Never creates an inline button without a url (avoids Telegram Bad Request)
-     - If no URL but low-level payment details exist (pay_address + pay_amount),
-       present a safe callback button that reveals those details to the user.
+    Generates a NOWPayments invoice, but first enforces a MINIMUM_USD fiat threshold.
+    If order total < MINIMUM_USD, offers quick actions to increase quantity or cancel.
+    Otherwise, creates the invoice (with retries), saves order and returns payment URL or payment details.
     """
     data = await state.get_data()
-    bin_header = data['bin']
-    quantity = data['quantity']
-    total_price = data['price']
-    user_id = data['user_id']
+    bin_header = data.get('bin')
+    quantity = int(data.get('quantity', 1))
+    total_price = float(data.get('price', 0.0))
+    user_id = data.get('user_id')
+
+    # defensive validation
+    if not bin_header or not user_id:
+        await callback.answer("Order data missing — please start again.", show_alert=True)
+        await state.clear()
+        return
+
+    # 1) Enforce fiat minimum (user requested $10)
+    if total_price < MINIMUM_USD:
+        # how many units required at current unit_price
+        unit_price = float(data.get('unit_price', KEY_PRICE_INFOLESS))
+        if unit_price <= 0:
+            unit_price = KEY_PRICE_INFOLESS
+
+        # compute minimal quantity to reach MINIMUM_USD
+        import math
+        needed_qty = max(1, int(math.ceil(MINIMUM_USD / unit_price)))
+        increase_by = max(needed_qty - quantity, 0)
+        # If already less, offer increase by exact needed, or by 1
+        msg = (
+            f"⚠️ *Minimum payment required*\n\n"
+            f"The provider requires a minimum invoice amount of *${MINIMUM_USD:.2f}*.\n"
+            f"Your current total is *${total_price:.2f}* for *{quantity}* "
+            f"{'Key' if quantity==1 else 'Keys'} (unit: ${unit_price:.2f}).\n\n"
+            f"To reach the minimum you need at least *{needed_qty}* "
+            f"{'Key' if needed_qty==1 else 'Keys'} (increase by {increase_by}).\n\n"
+            "Choose an action:"
+        )
+
+rows = []
+if increase_by > 0:
+    rows.append([InlineKeyboardButton(
+        text=f"➕ Increase to {needed_qty} (meets ${MINIMUM_USD:.0f})",
+        callback_data=f"increase_qty:{increase_by}"
+    )])
+rows.append([InlineKeyboardButton(text="➕ Increase quantity by 1", callback_data="increase_qty:1")])
+rows.append([InlineKeyboardButton(text="❌ Cancel order", callback_data="cancel_invoice")])
+kb = InlineKeyboardMarkup(inline_keyboard=rows)
+
+        try:
+            await callback.message.edit_text(msg, reply_markup=kb, parse_mode='Markdown')
+        except Exception:
+            await callback.message.answer(msg, reply_markup=kb, parse_mode='Markdown')
+        await callback.answer()
+        return
 
     loop = asyncio.get_event_loop()
 
@@ -463,6 +507,52 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
 
     await callback.answer()
 
+@router.callback_query(F.data.startswith("increase_qty:"))
+async def increase_qty_callback(callback: CallbackQuery, state: FSMContext):
+    """
+    Increments the order quantity stored in state and re-runs invoice generation.
+    callback.data format: "increase_qty:<n>"
+    """
+    try:
+        parts = callback.data.split(":", 1)
+        inc = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
+
+        data = await state.get_data()
+        if not data:
+            await callback.answer("No pending order found.", show_alert=True)
+            return
+
+        quantity = int(data.get('quantity', 1)) + inc
+        unit_price = float(data.get('unit_price', KEY_PRICE_INFOLESS))
+        total_price = quantity * unit_price
+
+        # update state and keep other fields
+        await state.update_data(quantity=quantity, price=total_price)
+
+        # acknowledge then re-run invoice generation by calling the same handler
+        await callback.answer("Quantity updated — regenerating invoice...", show_alert=False)
+        await handle_invoice_confirmation(callback, state)
+
+    except Exception:
+        logger.exception("Failed to increase quantity and regenerate invoice.")
+        await callback.answer("Failed to update quantity. Try again.", show_alert=True)
+
+
+@router.callback_query(F.data == "cancel_invoice")
+async def cancel_invoice_callback(callback: CallbackQuery, state: FSMContext):
+    """
+    Cancels the pending invoice/order and clears the state.
+    """
+    try:
+        await state.clear()
+        try:
+            await callback.message.edit_text("❌ Order canceled. You can start over whenever ready.")
+        except Exception:
+            await callback.message.answer("❌ Order canceled. You can start over whenever ready.")
+        await callback.answer()
+    except Exception:
+        logger.exception("Failed to cancel invoice.")
+        await callback.answer("Failed to cancel. Try again.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("show_payment:"))
