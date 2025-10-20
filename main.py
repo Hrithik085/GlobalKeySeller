@@ -28,6 +28,12 @@ from nowpayments import NOWPayments
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
 from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count, get_key_and_mark_sold, get_order_from_db, save_order , update_order_status
 
+try:
+    from config import KEY_PRICE_INFOLESS, KEY_PRICE_FULL
+except Exception:
+    KEY_PRICE_INFOLESS = KEY_PRICE_USD
+    KEY_PRICE_FULL = KEY_PRICE_US
+
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -212,20 +218,33 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
             )
             return
 
-        total_price = quantity * KEY_PRICE_USD
-        await state.update_data(bin=key_header, quantity=quantity, price=total_price, user_id=message.from_user.id)
+# choose unit price based on key type
+unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
+total_price = quantity * unit_price
+
+# store both unit_price and total price in state for later invoice generation
+await state.update_data(
+    bin=key_header,
+    quantity=quantity,
+    price=total_price,
+    unit_price=unit_price,
+    user_id=message.from_user.id
+)
+
         await state.set_state(PurchaseState.waiting_for_confirmation) 
 
-        confirmation_message = (
-            f"🛒 **Order Confirmation**\n"
-            f"----------------------------------------\n"
-            f"Product: {key_type_label} Key (BIN `{key_header}`)\n"
-            f"Quantity: {quantity} Keys\n"
-            f"Stock Left: {available_stock - quantity} Keys\n" 
-            f"Total Due: **${total_price:.2f} {CURRENCY}**\n"
-            f"----------------------------------------\n\n"
-            f"✅ Ready to proceed to invoice?"
-        )
+confirmation_message = (
+    f"🛒 **Order Confirmation**\n"
+    f"----------------------------------------\n"
+    f"Product: {key_type_label} Key (BIN `{key_header}`)\n"
+    f"Quantity: {quantity} Keys\n"
+    f"Unit price: **${unit_price:.2f} {CURRENCY}**\n"
+    f"Total Due: **${total_price:.2f} {CURRENCY}**\n"
+    f"Stock Left: {available_stock - quantity} Keys\n"
+    f"----------------------------------------\n\n"
+    f"✅ Ready to proceed to invoice?"
+)
+
 
         await message.answer(
             confirmation_message,
