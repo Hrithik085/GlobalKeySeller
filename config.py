@@ -25,3 +25,5 @@ BASE_WEBHOOK_URL = f"https://{RENDER_HOSTNAME}" if RENDER_HOSTNAME else None
 
 # Webhook path (keeps it consistent)
 WEBHOOK_PATH = "/telegram"
+KEY_PRICE_INFOLESS = 2.50   # example USD unit price for info-less keys
+KEY_PRICE_FULL = 5.00  
