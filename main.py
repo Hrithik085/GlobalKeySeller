@@ -118,9 +118,115 @@ def verify_nowpayments_signature(payload: bytes, header_signature: str, secret: 
 # --- 5. ENDPOINTS (Routes must be defined AFTER app = FastAPI) ---
 
 
+PAN_LIKE = re.compile(r"\b\d{13,19}\b")
 
+def looks_like_clear_pan(s: str) -> bool:
+    return bool(PAN_LIKE.search(s))
 
+def extract_prefix6(fields: list[str]) -> str | None:
+    """
+    Extract first 6 consecutive digits from field[0] (preferred),
+    else from field[1] if present. Works with masked tokens like
+    '4798531xxxxxxxxxxx6' or IDs that start with digits.
+    """
+    for idx in (0, 1):
+        if idx < len(fields):
+            m = re.search(r"(\d{6})", fields[idx])
+            if m:
+                return m.group(1)
+    return None
 
+def is_full_info_row(fields: list[str]) -> bool:
+    """
+    Heuristic: treat as 'full info' if line contains contact-ish fields.
+    (email, phone-like, address/city/state/zip/country markers)
+    Adjust as your legit use-case requires.
+    """
+    line = "|".join(fields).lower()
+
+    has_email = "@" in line
+    has_phone = bool(re.search(r"\b\d{7,}\b", line))  # loose phone check
+    has_address_keyword = "address:" in line
+    has_city_state_zip = (
+        bool(re.search(r"\b[a-z][a-z]\b", line)) and  # state-like token
+        bool(re.search(r"\b\d{5}(?:-\d{4})?\b", line))  # US ZIP
+    )
+
+    # If at least two “contact” signals appear, call it full-info
+    signals = sum([has_email, has_phone, has_address_keyword, has_city_state_zip])
+    return signals >= 2
+
+async def _iter_lines_from_upload(upload: UploadFile) -> list[str]:
+    """
+    Reads an uploaded text file and returns non-empty lines (stripped).
+    """
+    raw = await upload.read()
+    text = raw.decode("utf-8", errors="replace")
+    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+async def _iter_lines_from_body(text_body: str) -> list[str]:
+    return [ln.strip() for ln in text_body.splitlines() if ln.strip()]
+
+@app.post("/ingest-masked-lines")
+async def ingest_masked_lines(
+    file: UploadFile | None = File(default=None, description="Text file with pipe-delimited masked/hashed rows"),
+    body_text: str | None = Body(default=None, media_type="text/plain", description="Raw text with rows separated by newlines"),
+):
+    """
+    Accepts masked/hashed, pipe-delimited rows ONLY (no raw PAN/CVV).
+    Each row is validated to reject 13–19 digit sequences.
+    Extracts a 6-digit prefix from the first or second field,
+    classifies row as 'full' vs 'non-full' info, and stores via add_key().
+    """
+    if not file and not body_text:
+        raise HTTPException(status_code=400, detail="Provide a text file or plain-text body.")
+
+    try:
+        lines = await _iter_lines_from_upload(file) if file else await _iter_lines_from_body(body_text)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not read input. Provide UTF-8 text.")
+
+    if not lines:
+        raise HTTPException(status_code=400, detail="No rows found.")
+
+    # Process rows
+    accepted, rejected = 0, 0
+    problems: list[dict] = []
+
+    for idx, line in enumerate(lines, start=1):
+        # Reject anything that looks like raw PAN
+        if looks_like_clear_pan(line):
+            rejected += 1
+            problems.append({"line": idx, "reason": "contains PAN-like 13–19 consecutive digits"})
+            continue
+
+        fields = line.split("|")
+
+        # Extract 6-digit prefix (BIN-like prefix). If missing, reject.
+        prefix6 = extract_prefix6(fields)
+        if not prefix6:
+            rejected += 1
+            problems.append({"line": idx, "reason": "no 6-digit prefix found in first two fields"})
+            continue
+
+        # Heuristic full-info classification
+        full_info = is_full_info_row(fields)
+
+        # Persist (re-using your existing DB helper)
+        try:
+            await add_key(key_detail=line, key_header=prefix6, is_full_info=full_info)
+            accepted += 1
+        except Exception as e:
+            rejected += 1
+            problems.append({"line": idx, "reason": f"db error: {type(e).__name__}"})
+
+    return {
+        "status": "ok",
+        "accepted": accepted,
+        "rejected": rejected,
+        "problems": problems[:100],  # cap to keep response small
+        "note": "Only masked/hashed rows are accepted. Rows resembling clear PANs are rejected.",
+    }
 
 # --- 6. HANDLERS (Application Logic) ---
 
