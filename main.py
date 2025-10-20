@@ -7,6 +7,7 @@ import json
 import asyncio
 import logging
 import functools
+import re
 from typing import Dict, Any, List, Optional
 from urllib.parse import parse_qsl, unquote_plus
 from contextlib import asynccontextmanager
