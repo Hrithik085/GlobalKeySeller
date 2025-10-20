@@ -186,12 +186,10 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# --- STOCK CHECK & INVOICE PROMPT HANDLER ---
 @router.message(PurchaseState.waiting_for_command, F.text.startswith("get_card_by_header:"))
 async def handle_card_purchase_command(message: Message, state: FSMContext):
     try:
         parts = message.text.split(":", 1)
-
         if len(parts) < 2 or not parts[1].strip():
             raise ValueError("Malformed command")
 
@@ -200,33 +198,42 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
 
         if len(command_args) < 2:
             raise ValueError("Quantity missing")
-
         quantity = int(command_args[1])
 
         data = await state.get_data()
         is_full_info = data.get('is_full_info', False)
         key_type_label = "Full Info" if is_full_info else "Info-less"
 
-        available_stock = await check_stock_count(key_header, is_full_info)
+        # --- Fetch available BINs for type ---
+        bins_with_count = await fetch_bins_with_count(is_full_info)
+        available_bins = {bin_header: count for bin_header, count in bins_with_count}
 
-        if available_stock < quantity:
-            bins_with_count = await fetch_bins_with_count(is_full_info)
-            available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
-
+        if key_header not in available_bins:
+            # BIN not found
             await message.answer(
-                f"⚠️ **Insufficient Stock!**\n"
-                f"We only have **{available_stock}** {key_type_label} keys for BIN `{key_header}`.\n\n"
-                f"Please re-enter your command with a lower quantity or choose another BIN:\n"
-                f"Available BINs: {', '.join(available_bins_formatted)}",
+                f"⚠️ The requested BIN `{key_header}` does not exist in our stock.\n"
+                f"Available BINs: {', '.join([f'{b} ({c} left)' for b, c in bins_with_count]) if bins_with_count else 'None'}",
                 parse_mode='Markdown'
             )
             return
 
-        # --- pricing: choose unit price based on key type (inside try) ---
+        available_stock = available_bins[key_header]
+
+        if available_stock < quantity:
+            # BIN exists but not enough quantity
+            await message.answer(
+                f"⚠️ **Insufficient Stock!**\n"
+                f"We only have **{available_stock}** {key_type_label} keys for BIN `{key_header}`.\n"
+                f"Please re-enter your command with a lower quantity or choose another BIN:\n"
+                f"Available BINs: {', '.join([f'{b} ({c} left)' for b, c in bins_with_count])}",
+                parse_mode='Markdown'
+            )
+            return
+
+        # --- OK, BIN exists and enough quantity, proceed ---
         unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
         total_price = quantity * unit_price
 
-        # store both unit_price and total price in state for later invoice generation
         await state.update_data(
             bin=key_header,
             quantity=quantity,
@@ -264,6 +271,7 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
     except Exception:
         logger.exception("Purchase command failed")
         await message.answer("❌ An unexpected error occurred. Please try again later.")
+
 
 # --- HANDLER: INVOICING (Implementation) ---
 def _run_sync_invoice_creation(total_price, user_id, bin_header, quantity):
