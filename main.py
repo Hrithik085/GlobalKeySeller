@@ -296,6 +296,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         return
 
     # 1) Enforce fiat minimum (user requested $10)
+       # 1) Enforce fiat minimum (user requested $10)
     if total_price < MINIMUM_USD:
         # how many units required at current unit_price
         unit_price = float(data.get('unit_price', KEY_PRICE_INFOLESS))
@@ -306,7 +307,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         import math
         needed_qty = max(1, int(math.ceil(MINIMUM_USD / unit_price)))
         increase_by = max(needed_qty - quantity, 0)
-        # If already less, offer increase by exact needed, or by 1
+
         msg = (
             f"⚠️ *Minimum payment required*\n\n"
             f"The provider requires a minimum invoice amount of *${MINIMUM_USD:.2f}*.\n"
@@ -317,15 +318,18 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             "Choose an action:"
         )
 
-rows = []
-if increase_by > 0:
-    rows.append([InlineKeyboardButton(
-        text=f"➕ Increase to {needed_qty} (meets ${MINIMUM_USD:.0f})",
-        callback_data=f"increase_qty:{increase_by}"
-    )])
-rows.append([InlineKeyboardButton(text="➕ Increase quantity by 1", callback_data="increase_qty:1")])
-rows.append([InlineKeyboardButton(text="❌ Cancel order", callback_data="cancel_invoice")])
-kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        # build keyboard safely (don't insert empty rows)
+        rows = []
+        if increase_by > 0:
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"➕ Increase to {needed_qty} (meets ${MINIMUM_USD:.0f})",
+                    callback_data=f"increase_qty:{increase_by}"
+                )
+            ])
+        rows.append([InlineKeyboardButton(text="➕ Increase quantity by 1", callback_data="increase_qty:1")])
+        rows.append([InlineKeyboardButton(text="❌ Cancel order", callback_data="cancel_invoice")])
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
 
         try:
             await callback.message.edit_text(msg, reply_markup=kb, parse_mode='Markdown')
@@ -333,6 +337,7 @@ kb = InlineKeyboardMarkup(inline_keyboard=rows)
             await callback.message.answer(msg, reply_markup=kb, parse_mode='Markdown')
         await callback.answer()
         return
+
 
     loop = asyncio.get_event_loop()
 
