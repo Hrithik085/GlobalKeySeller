@@ -13,7 +13,8 @@ from urllib.parse import parse_qsl, unquote_plus
 from contextlib import asynccontextmanager
 
 
-from fastapi import FastAPI, Request
+# replace with:
+from fastapi import FastAPI, Request, UploadFile, File, Body, HTTPException
 from starlette.responses import Response
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -29,7 +30,7 @@ from nowpayments import NOWPayments
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count, get_key_and_mark_sold, get_order_from_db, save_order , update_order_status
+from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count, get_key_and_mark_sold, get_order_from_db, save_order , update_order_status, add_key
 
 try:
     from config import KEY_PRICE_INFOLESS, KEY_PRICE_FULL
@@ -168,66 +169,6 @@ async def _iter_lines_from_upload(upload: UploadFile) -> list[str]:
 async def _iter_lines_from_body(text_body: str) -> list[str]:
     return [ln.strip() for ln in text_body.splitlines() if ln.strip()]
 
-@app.post("/ingest-masked-lines")
-async def ingest_masked_lines(
-    file: UploadFile | None = File(default=None, description="Text file with pipe-delimited masked/hashed rows"),
-    body_text: str | None = Body(default=None, media_type="text/plain", description="Raw text with rows separated by newlines"),
-):
-    """
-    Accepts masked/hashed, pipe-delimited rows ONLY (no raw PAN/CVV).
-    Each row is validated to reject 13–19 digit sequences.
-    Extracts a 6-digit prefix from the first or second field,
-    classifies row as 'full' vs 'non-full' info, and stores via add_key().
-    """
-    if not file and not body_text:
-        raise HTTPException(status_code=400, detail="Provide a text file or plain-text body.")
-
-    try:
-        lines = await _iter_lines_from_upload(file) if file else await _iter_lines_from_body(body_text)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Could not read input. Provide UTF-8 text.")
-
-    if not lines:
-        raise HTTPException(status_code=400, detail="No rows found.")
-
-    # Process rows
-    accepted, rejected = 0, 0
-    problems: list[dict] = []
-
-    for idx, line in enumerate(lines, start=1):
-        # # Reject anything that looks like raw PAN
-        # if looks_like_clear_pan(line):
-        #     rejected += 1
-        #     problems.append({"line": idx, "reason": "contains PAN-like 13–19 consecutive digits"})
-        #     continue
-
-        fields = line.split("|")
-
-        # Extract 6-digit prefix (BIN-like prefix). If missing, reject.
-        prefix6 = extract_prefix6(fields)
-        if not prefix6:
-            rejected += 1
-            problems.append({"line": idx, "reason": "no 6-digit prefix found in first two fields"})
-            continue
-
-        # Heuristic full-info classification
-        full_info = is_full_info_row(fields)
-
-        # Persist (re-using your existing DB helper)
-        try:
-            await add_key(key_detail=line, key_header=prefix6, is_full_info=full_info)
-            accepted += 1
-        except Exception as e:
-            rejected += 1
-            problems.append({"line": idx, "reason": f"db error: {type(e).__name__}"})
-
-    return {
-        "status": "ok",
-        "accepted": accepted,
-        "rejected": rejected,
-        "problems": problems[:100],  # cap to keep response small
-        "note": "Only masked/hashed rows are accepted. Rows resembling clear PANs are rejected.",
-    }
 
 # --- 6. HANDLERS (Application Logic) ---
 
@@ -1064,6 +1005,68 @@ async def nowpayments_debug(request: Request):
         return Response(status_code=500)
 
     return Response(status_code=200)
+
+@app.post("/ingest-masked-lines")
+async def ingest_masked_lines(
+    file: UploadFile | None = File(default=None, description="Text file with pipe-delimited masked/hashed rows"),
+    body_text: str | None = Body(default=None, media_type="text/plain", description="Raw text with rows separated by newlines"),
+):
+    """
+    Accepts masked/hashed, pipe-delimited rows ONLY (no raw PAN/CVV).
+    Each row is validated to reject 13–19 digit sequences.
+    Extracts a 6-digit prefix from the first or second field,
+    classifies row as 'full' vs 'non-full' info, and stores via add_key().
+    """
+    if not file and not body_text:
+        raise HTTPException(status_code=400, detail="Provide a text file or plain-text body.")
+
+    try:
+        lines = await _iter_lines_from_upload(file) if file else await _iter_lines_from_body(body_text)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not read input. Provide UTF-8 text.")
+
+    if not lines:
+        raise HTTPException(status_code=400, detail="No rows found.")
+
+    # Process rows
+    accepted, rejected = 0, 0
+    problems: list[dict] = []
+
+    for idx, line in enumerate(lines, start=1):
+        # # Reject anything that looks like raw PAN
+        # if looks_like_clear_pan(line):
+        #     rejected += 1
+        #     problems.append({"line": idx, "reason": "contains PAN-like 13–19 consecutive digits"})
+        #     continue
+
+        fields = line.split("|")
+
+        # Extract 6-digit prefix (BIN-like prefix). If missing, reject.
+        prefix6 = extract_prefix6(fields)
+        if not prefix6:
+            rejected += 1
+            problems.append({"line": idx, "reason": "no 6-digit prefix found in first two fields"})
+            continue
+
+        # Heuristic full-info classification
+        full_info = is_full_info_row(fields)
+
+        # Persist (re-using your existing DB helper)
+        try:
+            await add_key(key_detail=line, key_header=prefix6, is_full_info=full_info)
+            accepted += 1
+        except Exception as e:
+            rejected += 1
+            problems.append({"line": idx, "reason": f"db error: {type(e).__name__}"})
+
+    return {
+        "status": "ok",
+        "accepted": accepted,
+        "rejected": rejected,
+        "problems": problems[:100],  # cap to keep response small
+        "note": "Only masked/hashed rows are accepted. Rows resembling clear PANs are rejected.",
+    }
+
 
 
 
