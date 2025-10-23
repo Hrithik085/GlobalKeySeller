@@ -35,7 +35,7 @@ from database import (
     fetch_codes_with_count, get_key_and_mark_sold, get_order_from_db, save_order, update_order_status, add_key,
     # NEW:
     fetch_types_with_count, fetch_bins_by_type_with_count, quote_random_prices, get_random_keys_and_mark_sold,
-    mark_order_fulfilled,  # you’re already calling this in fulfill
+    mark_order_fulfilled, get_price_by_header,  # you’re already calling this in fulfill
 )
 try:
     from config import KEY_PRICE_INFOLESS, KEY_PRICE_FULL
@@ -509,7 +509,12 @@ async def handle_giftCard_purchase_command(message: Message, state: FSMContext):
             return
 
         # --- OK, code exists and enough quantity, proceed ---
-        unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
+        # 🔑 FIX: Get dynamic unit price from DB, fallback to config if DB fails or is None
+        unit_price = await get_price_by_header(key_header, is_full_info)
+        if unit_price is None:
+            unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
+            logger.warning(f"Using fallback config price for key_header {key_header}.")
+
         total_price = quantity * unit_price
 
         await state.update_data(
@@ -589,8 +594,16 @@ async def handle_bin_qty(message: Message, state: FSMContext):
     if qty > available:
         await message.answer(f"Only {available} available for `{key_header}`.")
         return
-    unit_price = KEY_PRICE_FULL  # your existing fixed full-info price
+
+    # 🔑 FIX: Get dynamic unit price from DB, fallback to config if DB fails or is None
+    unit_price = await get_price_by_header(key_header, is_full_info)
+    if unit_price is None:
+        # Fallback for Full Info keys
+        unit_price = KEY_PRICE_FULL
+        logger.warning(f"Using fallback config price for BIN {key_header}.")
+
     total_price = qty * unit_price
+
     await state.update_data(quantity=qty, price=total_price, unit_price=unit_price, user_id=message.from_user.id)
     await state.set_state(PurchaseState.waiting_for_confirmation)
     await message.answer(
@@ -940,11 +953,20 @@ async def set_qty_callback(callback: CallbackQuery, state: FSMContext):
     try:
         qty = int(callback.data.split(":", 1)[1])
         data = await state.get_data()
+
         if not data:
             await callback.answer("No pending order found.", show_alert=True)
             return
-        unit_price = float(data.get("unit_price", KEY_PRICE_INFOLESS))
-        await state.update_data(quantity=qty, price=qty * unit_price)
+
+        key_header = data.get("code")
+        is_full_info = data.get("is_full_info", False)
+
+        # 🔑 FIX: Get dynamic unit price from DB, fallback to config if DB fails or is None
+        unit_price = await get_price_by_header(key_header, is_full_info)
+        if unit_price is None:
+            unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
+
+        await state.update_data(quantity=qty, price=qty * unit_price, unit_price=unit_price)
         await callback.answer("Quantity updated — regenerating invoice…", show_alert=False)
         await handle_invoice_confirmation(callback, state)
     except Exception:

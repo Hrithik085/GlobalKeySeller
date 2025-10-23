@@ -295,6 +295,18 @@ async def get_random_keys_and_mark_sold(is_full_info: bool, quantity: int, card_
             return []
         return [{"key_detail": r["key_detail"], "price": float(r["price"])} for r in rows]
 
+async def get_price_by_header(key_header: str, is_full_info: bool) -> Optional[float]:
+    """Returns the price of a single unsold key for a given header."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # We sample one price, as all keys of the same header/type should have the same price for fixed-price sales
+        price = await conn.fetchval("""
+            SELECT price FROM card_inventory
+            WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
+            LIMIT 1
+        """, key_header, is_full_info)
+        return float(price) if price is not None else None
+
 
 async def populate_initial_keys():
     """
