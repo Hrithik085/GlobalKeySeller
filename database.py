@@ -218,6 +218,92 @@ async def update_order_status(order_id: str, status: str):
         
 # --- Population Logic ---
 
+# database.py (generic lawful inventory)
+
+async def fetch_available_types(has_extra_info: bool) -> List[Tuple[str, int]]:
+    """
+    Returns [(type, count_unsold), ...] for items with given has_extra_info flag.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT type, COUNT(*) AS count
+            FROM card_inventory
+            WHERE is_full_info = $1 AND sold = FALSE
+            GROUP BY type
+            HAVING COUNT(*) > 0
+            ORDER BY count DESC
+        """, has_extra_info)
+        return [(r["type"], r["count"]) for r in rows]
+
+async def fetch_bins_with_count_by_type(has_extra_info: bool, item_type: Optional[str]) -> List[Tuple[str, int]]:
+    """
+    Returns [(header, count), ...] filtered by type (if provided).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if item_type:
+            rows = await conn.fetch("""
+                SELECT key_header, COUNT(*) AS count
+                FROM card_inventory
+                WHERE is_full_info = $1 AND sold = FALSE AND type = $2
+                GROUP BY key_header
+                HAVING COUNT(*) > 0
+                ORDER BY count DESC
+            """, has_extra_info, item_type)
+        else:
+            rows = await conn.fetch("""
+                SELECT key_header, COUNT(*) AS count
+                FROM card_inventory
+                WHERE is_full_info = $1 AND sold = FALSE
+                GROUP BY key_header
+                HAVING COUNT(*) > 0
+                ORDER BY count DESC
+            """, has_extra_info)
+        return [(r["key_header"], r["count"]) for r in rows]
+
+async def check_stock_count_filtered(header: str, has_extra_info: bool, item_type: Optional[str]) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if item_type:
+            return await conn.fetchval("""
+                SELECT COUNT(*) FROM card_inventory
+                WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE AND type = $3
+            """, header, has_extra_info, item_type) or 0
+        return await conn.fetchval("""
+            SELECT COUNT(*) FROM card_inventory
+            WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
+        """, header, has_extra_info) or 0
+
+async def pick_random_header(has_extra_info: bool, item_type: Optional[str]) -> Optional[str]:
+    """
+    Randomly choose a header from available stock (optionally filtered by type).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if item_type:
+            row = await conn.fetchrow("""
+                SELECT key_header
+                FROM card_inventory
+                WHERE is_full_info = $1 AND sold = FALSE AND type = $2
+                GROUP BY key_header
+                HAVING COUNT(*) > 0
+                ORDER BY random()
+                LIMIT 1
+            """, has_extra_info, item_type)
+        else:
+            row = await conn.fetchrow("""
+                SELECT key_header
+                FROM card_inventory
+                WHERE is_full_info = $1 AND sold = FALSE
+                GROUP BY key_header
+                HAVING COUNT(*) > 0
+                ORDER BY random()
+                LIMIT 1
+            """, has_extra_info)
+        return row["key_header"] if row else None
+
+
 async def populate_initial_keys():
     """Populate the card_inventory table with sample keys, some sold and some unsold."""
     pool = await get_pool()
