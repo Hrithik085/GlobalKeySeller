@@ -4,3 +4,5 @@ fastapi
 uvicorn[standard]
 python-dotenv
 asgiref
+nowpayments 
+python-multipart

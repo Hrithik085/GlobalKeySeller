@@ -10,7 +10,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")  # e.g. postgres://user:pass@host:5
 # Pricing & currency
 CURRENCY = "USD"
 try:
-    KEY_PRICE_USD = 10.00
+    KEY_PRICE_USD = 15.00
 except ValueError:
     KEY_PRICE_USD = 1.0
 
@@ -25,3 +25,5 @@ BASE_WEBHOOK_URL = f"https://{RENDER_HOSTNAME}" if RENDER_HOSTNAME else None
 
 # Webhook path (keeps it consistent)
 WEBHOOK_PATH = "/telegram"
+KEY_PRICE_INFOLESS = 2.50   # example USD unit price for info-less keys
+KEY_PRICE_FULL = 5.00  
