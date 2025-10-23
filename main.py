@@ -30,7 +30,7 @@ from nowpayments import NOWPayments
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count, get_key_and_mark_sold, get_order_from_db, save_order , update_order_status, add_key
+from database import initialize_db, populate_initial_keys, find_available_codes, get_pool, check_stock_count, fetch_codes_with_count, get_key_and_mark_sold, get_order_from_db, save_order , update_order_status, add_key
 
 try:
     from config import KEY_PRICE_INFOLESS, KEY_PRICE_FULL
@@ -91,10 +91,10 @@ def get_key_type_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Info-less Keys", callback_data="type_select:0")]
     ])
 
-def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardMarkup:
+def get_confirmation_keyboard(code_header: str, quantity: int) -> InlineKeyboardMarkup:
     """Keyboard to confirm order or cancel after stock check."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Confirm & Invoice", callback_data=f"confirm:{bin_header}:{quantity}")],
+        [InlineKeyboardButton(text="✅ Confirm & Invoice", callback_data=f"confirm:{code_header}:{quantity}")],
         [InlineKeyboardButton(text="⬅️ Change Command", callback_data="back_to_type")]
     ])
 
@@ -214,7 +214,7 @@ async def start_handler(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(PurchaseState.waiting_for_type)
     welcome_text = (
-        "🌟 **Welcome to Rockers CVV Shop!** 💳\n\n"
+        "🌟 **Welcome to Rockers GiftgiftCard Shop!** 💳\n\n"
         "We offer high-quality Keys:\n"
         "  • Info-less Keys\n"
         "  • Full Info Keys\n\n"
@@ -247,20 +247,20 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     key_type_label = "Full Info" if is_full_info else "Info-less"
     
     try:
-        bins_with_count = await fetch_bins_with_count(is_full_info)
-        available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
+        codes_with_count = await fetch_codes_with_count(is_full_info)
+        available_codes_formatted = [f"{code_header} ({count} left)" for code_header, count in codes_with_count]
     except Exception:
-        available_bins_formatted = ["DB ERROR"]
-        logger.exception("Failed to fetch available BINs during menu load.")
+        available_codes_formatted = ["DB ERROR"]
+        logger.exception("Failed to fetch available codes during menu load.")
 
     command_guide = (
         f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
         f"**Copy/Send this:**\n"
-        f"```\nget_card_by_header:<BIN> <Quantity>\n```\n"
+        f"```\nget_giftCard_by_header:<code> <Quantity>\n```\n"
         f"✨ Example for buying 10 Keys:\n"
-        f"**`get_card_by_header:456456 10`**\n\n"
-        f"Available BINs in stock: {', '.join(available_bins_formatted) if available_bins_formatted else 'None'}"
+        f"**`get_giftCard_by_header:456456 10`**\n\n"
+        f"Available codes in stock: {', '.join(available_codes_formatted) if available_codes_formatted else 'None'}"
     )
 
     await callback.message.edit_text(
@@ -271,8 +271,8 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-@router.message(PurchaseState.waiting_for_command, F.text.startswith("get_card_by_header:"))
-async def handle_card_purchase_command(message: Message, state: FSMContext):
+@router.message(PurchaseState.waiting_for_command, F.text.startswith("get_giftCard_by_header:"))
+async def handle_giftCard_purchase_command(message: Message, state: FSMContext):
     try:
         parts = message.text.split(":", 1)
         if len(parts) < 2 or not parts[1].strip():
@@ -289,38 +289,38 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         is_full_info = data.get('is_full_info', False)
         key_type_label = "Full Info" if is_full_info else "Info-less"
 
-        # --- Fetch available BINs for type ---
-        bins_with_count = await fetch_bins_with_count(is_full_info)
-        available_bins = {bin_header: count for bin_header, count in bins_with_count}
+        # --- Fetch available codes for type ---
+        codes_with_count = await fetch_codes_with_count(is_full_info)
+        available_codes = {code_header: count for code_header, count in codes_with_count}
 
-        if key_header not in available_bins:
-            # BIN not found
+        if key_header not in available_codes:
+            # code not found
             await message.answer(
-                f"⚠️ The requested BIN `{key_header}` does not exist in our stock.\n"
-                f"Available BINs: {', '.join([f'{b} ({c} left)' for b, c in bins_with_count]) if bins_with_count else 'None'}",
+                f"⚠️ The requested code `{key_header}` does not exist in our stock.\n"
+                f"Available codes: {', '.join([f'{b} ({c} left)' for b, c in codes_with_count]) if codes_with_count else 'None'}",
                 parse_mode='Markdown'
             )
             return
 
-        available_stock = available_bins[key_header]
+        available_stock = available_codes[key_header]
 
         if available_stock < quantity:
-            # BIN exists but not enough quantity
+            # code exists but not enough quantity
             await message.answer(
                 f"⚠️ **Insufficient Stock!**\n"
-                f"We only have **{available_stock}** {key_type_label} keys for BIN `{key_header}`.\n"
-                f"Please re-enter your command with a lower quantity or choose another BIN:\n"
-                f"Available BINs: {', '.join([f'{b} ({c} left)' for b, c in bins_with_count])}",
+                f"We only have **{available_stock}** {key_type_label} keys for code `{key_header}`.\n"
+                f"Please re-enter your command with a lower quantity or choose another code:\n"
+                f"Available codes: {', '.join([f'{b} ({c} left)' for b, c in codes_with_count])}",
                 parse_mode='Markdown'
             )
             return
 
-        # --- OK, BIN exists and enough quantity, proceed ---
+        # --- OK, code exists and enough quantity, proceed ---
         unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
         total_price = quantity * unit_price
 
         await state.update_data(
-            bin=key_header,
+            code=key_header,
             quantity=quantity,
             price=total_price,
             unit_price=unit_price,
@@ -332,7 +332,7 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
         confirmation_message = (
             f"🛒 **Order Confirmation**\n"
             f"----------------------------------------\n"
-            f"Product: {key_type_label} Key (BIN `{key_header}`)\n"
+            f"Product: {key_type_label} Key (code `{key_header}`)\n"
             f"Quantity: {quantity} Keys\n"
             f"Unit price: **${unit_price:.2f} {CURRENCY}**\n"
             f"Total Due: **${total_price:.2f} {CURRENCY}**\n"
@@ -350,7 +350,7 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
     except (IndexError, ValueError):
         await message.answer(
             "❌ **Error:** Please use the correct format:\n"
-            "Example: `get_card_by_header:456456 10`",
+            "Example: `get_giftCard_by_header:456456 10`",
             parse_mode='Markdown'
         )
     except Exception:
@@ -359,13 +359,13 @@ async def handle_card_purchase_command(message: Message, state: FSMContext):
 
 
 # --- HANDLER: INVOICING (Implementation) ---
-def _run_sync_invoice_creation(total_price, user_id, bin_header, quantity):
+def _run_sync_invoice_creation(total_price, user_id, code_header, quantity):
     """Synchronous API call run inside a thread."""
     return nowpayments_client.create_payment(
         price_amount=total_price,
         price_currency=CURRENCY,
         ipn_callback_url=FULL_IPN_URL,
-        order_id=f"ORDER-{user_id}-{bin_header}-{quantity}-{int(time.time())}",
+        order_id=f"ORDER-{user_id}-{code_header}-{quantity}-{int(time.time())}",
         pay_currency="usdttrc20"
     )
 
@@ -374,21 +374,21 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     """
     Generates a NOWPayments invoice, but first enforces:
       1) A fiat MINIMUM_USD threshold
-      2) Live stock availability for the chosen BIN
+      2) Live stock availability for the chosen code
 
     If constraints aren't met, shows the user actionable buttons to adjust quantity,
-    pick another BIN, or cancel. Otherwise, creates the invoice (with retries),
+    pick another code, or cancel. Otherwise, creates the invoice (with retries),
     saves the order, and returns a payment URL or raw payment details.
     """
     data = await state.get_data()
-    bin_header = data.get("bin")
+    code_header = data.get("code")
     quantity = int(data.get("quantity", 1))
     total_price = float(data.get("price", 0.0))
     user_id = data.get("user_id")
     is_full_info = data.get("is_full_info", False)
 
     # Defensive validation
-    if not bin_header or not user_id:
+    if not code_header or not user_id:
         await callback.answer("Order data missing — please start again.", show_alert=True)
         await state.clear()
         return
@@ -403,17 +403,17 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         needed_qty = max(1, int(math.ceil(MINIMUM_USD / unit_price)))
         increase_by = max(needed_qty - quantity, 0)
 
-        # Check if the BIN can even reach the minimum given current stock
-        available_stock = await check_stock_count(bin_header, is_full_info)
+        # Check if the code can even reach the minimum given current stock
+        available_stock = await check_stock_count(code_header, is_full_info)
 
         if needed_qty > available_stock:
-            # This BIN cannot reach the minimum at all
+            # This code cannot reach the minimum at all
             msg = (
                 f"⚠️ *Minimum payment required*\n\n"
                 f"Provider minimum: *${MINIMUM_USD:.2f}*.\n"
                 f"Your total: *${total_price:.2f}* for *{quantity}* "
                 f"{'Key' if quantity == 1 else 'Keys'} (unit: ${unit_price:.2f}).\n\n"
-                f"BIN `{bin_header}` has only *{available_stock}* in stock, "
+                f"code `{code_header}` has only *{available_stock}* in stock, "
                 f"but you would need *{needed_qty}* to meet the minimum.\n\n"
                 "Choose an option:"
             )
@@ -421,11 +421,11 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             if available_stock > 0:
                 rows.append([
                     InlineKeyboardButton(
-                        text=f"Use {available_stock} (max for this BIN)",
+                        text=f"Use {available_stock} (max for this code)",
                         callback_data=f"set_qty:{available_stock}"
                     )
                 ])
-            rows.append([InlineKeyboardButton(text="Choose another BIN", callback_data="back_to_type")])
+            rows.append([InlineKeyboardButton(text="Choose another code", callback_data="back_to_type")])
             rows.append([InlineKeyboardButton(text="Cancel order", callback_data="cancel_invoice")])
 
             try:
@@ -435,7 +435,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             await callback.answer()
             return
         else:
-            # BIN can reach the minimum: offer exact increase and +1
+            # code can reach the minimum: offer exact increase and +1
             msg = (
                 f"⚠️ *Minimum payment required*\n\n"
                 f"Provider minimum: *${MINIMUM_USD:.2f}*.\n"
@@ -464,17 +464,17 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             return
 
     # --- Live stock re-check (in case stock changed since confirmation screen) ---
-    available_stock = await check_stock_count(bin_header, is_full_info)
+    available_stock = await check_stock_count(code_header, is_full_info)
     if quantity > available_stock:
         msg = (
-            f"⚠️ Stock changed for BIN `{bin_header}`.\n"
+            f"⚠️ Stock changed for code `{code_header}`.\n"
             f"Available now: *{available_stock}* | Requested: *{quantity}*.\n\n"
             "Choose an option:"
         )
         kb_rows = []
         if available_stock > 0:
             kb_rows.append([InlineKeyboardButton(text=f"Use {available_stock}", callback_data=f"set_qty:{available_stock}")])
-        kb_rows.append([InlineKeyboardButton(text="Choose another BIN", callback_data="back_to_type")])
+        kb_rows.append([InlineKeyboardButton(text="Choose another code", callback_data="back_to_type")])
         kb_rows.append([InlineKeyboardButton(text="Cancel order", callback_data="cancel_invoice")])
 
         await callback.message.edit_text(
@@ -524,7 +524,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
                     _run_sync_invoice_creation,
                     total_price=total_price,
                     user_id=user_id,
-                    bin_header=bin_header,
+                    code_header=code_header,
                     quantity=quantity
                 )
             )
@@ -541,7 +541,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
                 await save_order(
                     order_id=invoice_response.get("order_id"),
                     user_id=user_id,
-                    key_header=bin_header,
+                    key_header=code_header,
                     quantity=quantity,
                     is_full_info=is_full_info,
                     status="pending"
@@ -684,20 +684,20 @@ async def increase_qty_callback(callback: CallbackQuery, state: FSMContext):
             await callback.answer("No pending order found.", show_alert=True)
             return
 
-        bin_header = data.get("bin")
+        code_header = data.get("code")
         is_full_info = data.get("is_full_info", False)
         unit_price = float(data.get("unit_price", KEY_PRICE_INFOLESS))
 
         # desired new quantity
         requested_qty = int(data.get("quantity", 1)) + inc
 
-        # re-check live stock for this BIN
-        available_stock = await check_stock_count(bin_header, is_full_info)
+        # re-check live stock for this code
+        available_stock = await check_stock_count(code_header, is_full_info)
 
         if requested_qty > available_stock:
             # Build a helpful message + choices
             msg = (
-                f"⚠️ Not enough stock for BIN `{bin_header}`.\n"
+                f"⚠️ Not enough stock for code `{code_header}`.\n"
                 f"Available: *{available_stock}* | Requested: *{requested_qty}*.\n\n"
                 "Choose an option below:"
             )
@@ -711,8 +711,8 @@ async def increase_qty_callback(callback: CallbackQuery, state: FSMContext):
                         callback_data=f"set_qty:{available_stock}"
                     )
                 ])
-            # let user pick another BIN or cancel
-            kb_rows.append([InlineKeyboardButton(text="Choose another BIN", callback_data="back_to_type")])
+            # let user pick another code or cancel
+            kb_rows.append([InlineKeyboardButton(text="Choose another code", callback_data="back_to_type")])
             kb_rows.append([InlineKeyboardButton(text="Cancel order", callback_data="cancel_invoice")])
 
             await callback.message.edit_text(
@@ -859,12 +859,12 @@ async def fulfill_order(order_id: str):
         return
 
     user_id = order['user_id']
-    bin_header = order['key_header']
+    code_header = order['key_header']
     quantity = order['quantity']
     is_full_info = order['is_full_info']
 
     # Atomically get keys and mark them sold
-    keys_list = await get_key_and_mark_sold(bin_header, is_full_info, quantity)
+    keys_list = await get_key_and_mark_sold(code_header, is_full_info, quantity)
     
     if keys_list:
         # Send keys to user
@@ -880,7 +880,7 @@ async def fulfill_order(order_id: str):
         logger.info(f"Order {order_id} fulfilled successfully.")
         
           # ✅ Mark order as paid in DB
-        await update_order_status(order_id, "paid")
+      await mark_order_fulfilled(order_id)
         
     else:
         logger.error(f"Fulfillment failed for order {order_id}: Stock disappeared.")
@@ -1104,7 +1104,6 @@ async def ingest_masked_lines(
     body_text: str | None = Body(default=None, media_type="text/plain", description="Raw text with rows separated by newlines"),
 ):
     """
-    Accepts masked/hashed, pipe-delimited rows ONLY (no raw PAN/CVV).
     Each row is validated to reject 13–19 digit sequences.
     Extracts a 6-digit prefix from the first or second field,
     classifies row as 'full' vs 'non-full' info, and stores via add_key().
@@ -1133,7 +1132,7 @@ async def ingest_masked_lines(
 
         fields = line.split("|")
 
-        # Extract 6-digit prefix (BIN-like prefix). If missing, reject.
+        # Extract 6-digit prefix (code-like prefix). If missing, reject.
         prefix6 = extract_prefix6(fields)
         if not prefix6:
             rejected += 1
