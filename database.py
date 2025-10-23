@@ -33,7 +33,7 @@ async def get_pool() -> asyncpg.Pool:
         ssl_ctx = build_ssl_context()
 
         # Parse URL into components for clean parameter passing
-        params = await get_raw_connection_params(DATABASE_URL)
+params = get_raw_connection_params(DATABASE_URL)
 
         _pool = await asyncpg.create_pool(
             user=params['user'],
@@ -144,37 +144,31 @@ async def fetch_codes_with_count(is_full_info: bool) -> List[Tuple[str, int]]:
 
 # --- NEW: ATOMIC FULFILLMENT FUNCTION ---
 async def get_key_and_mark_sold(key_header: str, is_full_info: bool, quantity: int) -> List[str]:
-    """
-    Atomically retrieves the key details and updates the 'sold' status to TRUE.
-    This function is called upon successful payment confirmation.
-    """
     pool = await get_pool()
-    
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            # 1. Select the IDs and details of the required keys
-            key_records = await conn.fetch("""
-                SELECT id, key_detail
+    async with pool.acquire() as conn, conn.transaction():
+        rows = await conn.fetch("""
+            WITH picked AS (
+                SELECT id
                 FROM card_inventory
-                WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
+                WHERE key_header = $1
+                  AND is_full_info = $2
+                  AND sold = FALSE
+                ORDER BY id
+                FOR UPDATE SKIP LOCKED
                 LIMIT $3
-                FOR UPDATE
-            """, key_header, is_full_info, quantity)
-            
-            if len(key_records) < quantity:
-                return [] # Stock disappeared between check and fulfillment
+            )
+            UPDATE card_inventory c
+            SET sold = TRUE
+            FROM picked p
+            WHERE c.id = p.id
+            RETURNING c.key_detail
+        """, key_header, is_full_info, quantity)
 
-            key_ids = [record['id'] for record in key_records]
-            key_details = [record['key_detail'] for record in key_records]
+        if len(rows) < quantity:
+            return []
+        return [r["key_detail"] for r in rows]
 
-            # 2. Mark the selected keys as sold
-            await conn.executemany("""
-                UPDATE card_inventory
-                SET sold = TRUE
-                WHERE id = $1
-            """, [(id,) for id in key_ids])
-            
-            return key_details
+
 
 async def get_order_from_db(order_id: str):
     """Fetch an order by order_id (used in fulfill_order)."""
@@ -197,10 +191,10 @@ async def save_order(order_id: str, user_id: int, key_header: str, quantity: int
 async def mark_order_fulfilled(order_id: str):
     pool = await get_pool()
     async with pool.acquire() as conn:
-await conn.execute(
-    "UPDATE orders SET fulfilled = TRUE, status = 'paid' WHERE order_id = $1", order_id
-)
-
+        await conn.execute(
+            "UPDATE orders SET fulfilled = TRUE, status = 'paid' WHERE order_id = $1",
+            order_id
+        )
 
 async def update_order_status(order_id: str, status: str):
     """Update the status of an existing order (e.g., 'pending', 'paid', 'failed')."""
@@ -224,32 +218,32 @@ async def populate_initial_keys():
 
         # --- Full Info Keys ---
         full_info_keys = [
-            ("123123xxxxxxxxxx",       "456456", True,  False, "AB"),
-          ("123123xxxxxxxxxx",        "456456", True,  True,  "AB"),
-                 ("123123xxxxxxxxxx",     "123123", True,  False, "BC"),
-             ("123123xxxxxxxxxx",       "987654", True,  True,  "CD"),
-           ("123123xxxxxxxxxx",    "321321", True,  False, "AB"),
+            ("123123xxxxxxxxxx", "456456", True,  False, "AB"),
+            ("123123xxxxxxxxxx", "456456", True,  True,  "AB"),
+            ("123123xxxxxxxxxx", "123123", True,  False, "BC"),
+            ("123123xxxxxxxxxx", "987654", True,  True,  "CD"),
+            ("123123xxxxxxxxxx", "321321", True,  False, "AB"),
         ]
 
         # --- Info-less Keys ---
         info_less_keys = [
-        ("123123xxxxxxxxxx",                    "543210", False, False, "AB"),
-        ("123123xxxxxxxxxx",                    "543210", False, True,  "AB"),
-        ("123123xxxxxxxxxx",                    "678901", False, False, "BC"),
-        ("123123xxxxxxxxxx",                    "345678", False, True,  "CD"),
-        ("123123xxxxxxxxxx",                    "789012", False, False, "CD"),
+            ("123123xxxxxxxxxx", "543210", False, False, "AB"),
+            ("123123xxxxxxxxxx", "543210", False, True,  "AB"),
+            ("123123xxxxxxxxxx", "678901", False, False, "BC"),
+            ("123123xxxxxxxxxx", "345678", False, True,  "CD"),
+            ("123123xxxxxxxxxx", "789012", False, False, "CD"),
         ]
 
         all_keys = full_info_keys + info_less_keys
 
-       for key_detail, key_header, is_full_info, sold, card_type in all_keys:
-           await conn.execute(
-               "INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold, type) "
-               "VALUES ($1, $2, $3, $4, $5)",
-               key_detail, key_header, is_full_info, sold, card_type
-           )
-        print("Card inventory population complete with some sold and some available keys.")
+        for key_detail, key_header, is_full_info, sold, card_type in all_keys:
+            await conn.execute(
+                "INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold, type) "
+                "VALUES ($1, $2, $3, $4, $5)",
+                key_detail, key_header, is_full_info, sold, card_type
+            )
 
+        print("Card inventory population complete with some sold and some available keys.")
 
 
 
