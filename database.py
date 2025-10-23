@@ -75,7 +75,8 @@ async def initialize_db():
                 key_detail TEXT NOT NULL,
                 key_header TEXT NOT NULL,
                 is_full_info BOOLEAN NOT NULL,
-                sold BOOLEAN NOT NULL DEFAULT FALSE
+                sold BOOLEAN NOT NULL DEFAULT FALSE,
+                type TEXT NOT NULL DEFAULT 'unknown'
             )
         """)
         print("PostgreSQL Database table 'card_inventory' created/reset successfully.")
@@ -90,6 +91,7 @@ async def initialize_db():
                 key_header TEXT NOT NULL,
                 quantity INT NOT NULL,
                 is_full_info BOOLEAN NOT NULL,
+                type TEXT NOT NULL DEFAULT 'unknown',
                 fulfilled BOOLEAN NOT NULL DEFAULT FALSE,
                 status TEXT DEFAULT 'pending'
             )
