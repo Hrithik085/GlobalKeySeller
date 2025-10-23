@@ -33,7 +33,6 @@ async def get_pool() -> asyncpg.Pool:
         ssl_ctx = build_ssl_context()
 
         # Parse URL into components for clean parameter passing
-        # 🔑 FIX: Correctly indent this line and the following block.
         params = get_raw_connection_params(DATABASE_URL)
 
         _pool = await asyncpg.create_pool(
@@ -59,32 +58,28 @@ def get_raw_connection_params(url: str) -> dict:
     }
 
 # --- Database Schema Functions ---
-
 async def initialize_db():
-    """Create or reset the card_inventory and orders tables with correct schema."""
+    """Create the card_inventory and orders tables only if they don't already exist."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # --- Drop and create card_inventory table ---
-        await conn.execute("""
-            DROP TABLE IF EXISTS card_inventory;
 
-            CREATE TABLE card_inventory (
+        # --- Create card_inventory table IF NOT EXISTS ---
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS card_inventory (
                 id SERIAL PRIMARY KEY,
                 key_detail TEXT NOT NULL,
                 key_header TEXT NOT NULL,
                 is_full_info BOOLEAN NOT NULL,
                 sold BOOLEAN NOT NULL DEFAULT FALSE,
-                  type TEXT NOT NULL DEFAULT 'unknown',
-                  price NUMERIC(10,2) NOT NULL DEFAULT 5.00
+                type TEXT NOT NULL DEFAULT 'unknown',
+                price NUMERIC(10,2) NOT NULL DEFAULT 5.00
             )
         """)
-        print("PostgreSQL Database table 'card_inventory' created/reset successfully.")
+        print("PostgreSQL Database table 'card_inventory' ensured to exist.")
 
-        # --- Drop and create orders table with status column ---
+        # --- Create orders table IF NOT EXISTS ---
         await conn.execute("""
-            DROP TABLE IF EXISTS orders;
-
-            CREATE TABLE orders (
+            CREATE TABLE IF NOT EXISTS orders (
                 order_id TEXT PRIMARY KEY,
                 user_id BIGINT NOT NULL,
                 key_header TEXT NOT NULL,
@@ -95,9 +90,7 @@ async def initialize_db():
                 status TEXT DEFAULT 'pending'
             )
         """)
-        print("PostgreSQL Database table 'orders' created/reset successfully.")
-
-
+        print("PostgreSQL Database table 'orders' ensured to exist.")
 
 # --- Update in database.py ---
 
@@ -125,7 +118,7 @@ async def check_stock_count(key_header: str, is_full_info: bool) -> int:
     pool = await get_pool()
     async with pool.acquire() as conn:
         count = await conn.fetchval("""
-            SELECT COUNT(*) FROM card_inventory 
+            SELECT COUNT(*) FROM card_inventory
             WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
         """, key_header, is_full_info)
         return count if count is not None else 0
@@ -147,7 +140,7 @@ async def fetch_codes_with_count(is_full_info: bool) -> List[Tuple[str, int]]:
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT key_header, COUNT(key_header) as count
-            FROM card_inventory 
+            FROM card_inventory
             WHERE is_full_info = $1 AND sold = FALSE
             GROUP BY key_header
             HAVING COUNT(key_header) > 0
@@ -218,7 +211,7 @@ async def update_order_status(order_id: str, status: str):
             SET status = $1
             WHERE order_id = $2
         """, status, order_id)
-        
+
 # --- Population Logic ---
 # --- New queries for type menus and random pricing/fulfillment ---
 
@@ -317,72 +310,10 @@ async def populate_initial_keys():
       - Sold vs unsold
       - Stock-shortage and 'no stock' BINs
       - Exact and below-minimum price totals
-
-    Notes:
-      • For BIN/header purchases you use config price (KEY_PRICE_*), not this 'price' column.
-      • For RANDOM Full Info purchases, your code sums the 'price' column.
     """
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        # Clear tables
-        await conn.execute("TRUNCATE TABLE card_inventory RESTART IDENTITY CASCADE")
-        await conn.execute("TRUNCATE TABLE orders RESTART IDENTITY CASCADE")
+    # 🚫 TRUNCATE and INSERT commands have been removed as requested.
+    pass # Function remains but does nothing now.
 
-        # Format: (key_detail, key_header, is_full_info, sold, type, price)
-        rows = [
-            # ---------- FULL INFO (used by both BIN flow & RANDOM flow) ----------
-            # BIN 456456 (type AB): 2 UNSOLD @ $5 (test: stock shortage if ask >2; BIN flow min $15 => need 3)
-            ("FI-456456-1-AB", "456456", True,  False, "AB", 5.00),
-            ("FI-456456-2-AB", "456456", True,  False, "AB", 5.00),
-            # also include some SOLD to ensure they are ignored
-            ("FI-456456-X-AB", "456456", True,  True,  "AB", 5.00),
-
-            # BIN 777777 (type AB): 4 UNSOLD @ $3 (BIN flow needs qty>=5 to reach $15; tests 'increase to' path)
-            ("FI-777777-1-AB", "777777", True,  False, "AB", 3.00),
-            ("FI-777777-2-AB", "777777", True,  False, "AB", 3.00),
-            ("FI-777777-3-AB", "777777", True,  False, "AB", 3.00),
-            ("FI-777777-4-AB", "777777", True,  False, "AB", 3.00),
-
-            # BIN 888888 (type AB): 1 UNSOLD @ $20 (BIN flow: single unit already over $15)
-            ("FI-888888-1-AB", "888888", True,  False, "AB", 20.00),
-
-            # Type BC (random tests): MIXED PRICES so random sum can be < or > $15
-            ("FI-123123-1-BC", "123123", True,  False, "BC", 4.00),
-            ("FI-123123-2-BC", "123123", True,  False, "BC", 6.00),
-            ("FI-124124-1-BC", "124124", True,  False, "BC", 8.00),
-            ("FI-124124-X-BC", "124124", True,  True,  "BC", 8.00),   # SOLD
-
-            # Type CD: a bunch unsold for random-any or random-by-type
-            ("FI-321321-1-CD", "321321", True,  False, "CD", 2.50),
-            ("FI-321321-2-CD", "321321", True,  False, "CD", 2.50),
-            ("FI-654654-1-CD", "654654", True,  False, "CD", 12.50),
-
-            # Type EF: create a header with NO UNSOLD (all sold) to test 'no stock in type'
-            ("FI-999999-X-EF", "999999", True, True, "EF", 5.00),
-            ("FI-999999-Y-EF", "999999", True, True, "EF", 7.00),
-
-            # ---------- INFO-LESS (BIN flow uses KEY_PRICE_INFOLESS; price column unused) ----------
-            # BIN 543210 (type AB): many unsold
-            ("IL-543210-1-AB", "543210", False, False, "AB", 1.00),
-            ("IL-543210-2-AB", "543210", False, False, "AB", 1.00),
-            ("IL-543210-3-AB", "543210", False, False, "AB", 1.00),
-            ("IL-543210-4-AB", "543210", False, False, "AB", 1.00),
-            ("IL-543210-5-AB", "543210", False, False, "AB", 1.00),
-            # BIN 678901 (type BC): some sold, some unsold
-            ("IL-678901-1-BC", "678901", False, False, "BC", 1.00),
-            ("IL-678901-X-BC", "678901", False, True,  "BC", 1.00),
-            # BIN 789012 (type CD): edge small stock
-            ("IL-789012-1-CD", "789012", False, False, "CD", 1.00),
-        ]
-
-        await conn.executemany(
-            """
-            INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold, type, price)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            """,
-            rows
-        )
-        print("Seeded card_inventory with diverse test data.")
 
 async def print_inventory_summary():
     """Optional: quick view of what’s in inventory after seeding."""
@@ -408,7 +339,8 @@ async def print_inventory_summary():
 async def main_setup():
     print("Initializing and populating DB...")
     await initialize_db()
-#     await populate_initial_keys()
+    # populate_initial_keys is still called but now does nothing
+    await populate_initial_keys()
 
     global _pool
     if _pool:
