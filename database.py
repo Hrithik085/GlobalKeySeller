@@ -69,15 +69,15 @@ async def initialize_db():
         # --- Drop and create card_inventory table ---
         await conn.execute("""
             DROP TABLE IF EXISTS card_inventory;
-
-            CREATE TABLE card_inventory (
-                id SERIAL PRIMARY KEY,
-                key_detail TEXT NOT NULL,
-                key_header TEXT NOT NULL,
-                is_full_info BOOLEAN NOT NULL,
-                sold BOOLEAN NOT NULL DEFAULT FALSE,
-                type TEXT NOT NULL DEFAULT 'unknown'
-            )
+CREATE TABLE card_inventory (
+  id SERIAL PRIMARY KEY,
+  key_detail TEXT NOT NULL,
+  key_header TEXT NOT NULL,
+  is_full_info BOOLEAN NOT NULL,
+  sold BOOLEAN NOT NULL DEFAULT FALSE,
+  type TEXT NOT NULL DEFAULT 'unknown',
+  price NUMERIC(10,2) NOT NULL DEFAULT 5.00
+);
         """)
         print("PostgreSQL Database table 'card_inventory' created/reset successfully.")
 
@@ -101,14 +101,44 @@ async def initialize_db():
 
 
 # replace your current add_key with this
-async def add_key(key_detail: str, key_header: str, is_full_info: bool, card_type: str = "unknown"):
-    """Add a single key to the card_inventory table."""
+sync def add_key(
+    key_detail: str,
+    key_header: str,
+    is_full_info: bool,
+    card_type: str = "unknown",
+    price: float = 0.0,
+):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold, type) "
-            "VALUES ($1, $2, $3, FALSE, $4)",
-            key_detail, key_header, is_full_info, card_type
+            """
+            INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold, type, price)
+            VALUES ($1, $2, $3, FALSE, $4, $5)
+            """,
+            key_detail, key_header, is_full_info, card_type, price
+        )
+
+async def fetch_price_for_header(header: str, has_extra_info: bool, item_type: Optional[str]) -> Optional[float]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if item_type:
+            return await conn.fetchval(
+                """
+                SELECT price FROM card_inventory
+                WHERE key_header=$1 AND is_full_info=$2 AND sold=FALSE AND type=$3
+                GROUP BY price
+                ORDER BY COUNT(*) DESC, price ASC
+                LIMIT 1
+                """, header, has_extra_info, item_type
+            )
+        return await conn.fetchval(
+            """
+            SELECT price FROM card_inventory
+            WHERE key_header=$1 AND is_full_info=$2 AND sold=FALSE
+            GROUP BY price
+            ORDER BY COUNT(*) DESC, price ASC
+            LIMIT 1
+            """, header, has_extra_info
         )
 
 
