@@ -265,46 +265,17 @@ async def start_handler(message: Message, state: FSMContext):
 
 # --- TYPE SELECTION (Shows Command Guide) ---
 
-@router.callback_query(PurchaseState.waiting_for_command, F.data == "back_to_type") 
-@router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type")
-async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
-    
-    if callback.data == "back_to_type":
-        await start_handler(callback.message, state) 
-        await callback.answer()
-        return
-    
-    is_full_info_str = callback.data.split(":")[1]
-    is_full_info = (is_full_info_str == '1')
-    await state.update_data(is_full_info=is_full_info)
-    await state.set_state(PurchaseState.waiting_for_command) 
-
-    key_type_label = "Full Info" if is_full_info else "Info-less"
-    
-    try:
-        bins_with_count = await fetch_bins_with_count(is_full_info)
-        available_bins_formatted = [f"{bin_header} ({count} left)" for bin_header, count in bins_with_count]
-    except Exception:
-        available_bins_formatted = ["DB ERROR"]
-        logger.exception("Failed to fetch available BINs during menu load.")
-
-    command_guide = (
-        f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
-        f"📝 To place an order, send a command in the following format:\n"
-        f"**Copy/Send this:**\n"
-        f"```\nget_card_by_header:<BIN> <Quantity>\n```\n"
-        f"✨ Example for buying 10 Keys:\n"
-        f"**`get_card_by_header:456456 10`**\n\n"
-        f"Available BINs in stock: {', '.join(available_bins_formatted) if available_bins_formatted else 'None'}"
-    )
-
-    await callback.message.edit_text(
-        command_guide,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Back to Type Selection", callback_data="back_to_type")]
-        ])
-    )
+@router.callback_query(PurchaseState.waiting_for_command, F.data == "back_to_types")
+@router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_types")
+async def handle_back_to_types(callback: CallbackQuery, state: FSMContext):
+    # Go back to the type list (uses existing choose_info_flag -> choose_type flow)
+    data = await state.get_data()
+    has_extra_info = data.get("is_full_info", False)
+    kb = await build_type_keyboard(has_extra_info)
+    await state.set_state(PurchaseState.waiting_for_type)
+    await callback.message.edit_text("Select a Type (or Random):", reply_markup=kb)
     await callback.answer()
+
 
 @router.message(PurchaseState.waiting_for_command, F.text.startswith("get_card_by_header:"))
 async def handle_card_purchase_command(message: Message, state: FSMContext):
@@ -478,9 +449,8 @@ async def choose_type(callback: CallbackQuery, state: FSMContext):
     has_extra_info = data.get("is_full_info", False)
 
     if chosen == "__RANDOM__":
-        # Random across ALL types; if you want random within a chosen type,
-        # you can present a second step or remember the last type selection.
-random_header = await pick_random_header(has_extra_info, None)
+        # random across ALL types (pass a specific type instead of None to constrain)
+        random_header = await pick_random_header(has_extra_info, None)
         if not random_header:
             await callback.answer("No stock available for a random pick.", show_alert=True)
             return
@@ -507,8 +477,8 @@ random_header = await pick_random_header(has_extra_info, None)
     await state.set_state(PurchaseState.waiting_for_command)
     await callback.message.edit_text(
         "To order, send:\n"
-        "```\nget_item_by_header:<HEADER> <Quantity>\n```\n"
-        f"Available headers: {', '.join(formatted)}",
+        "```\nget_item_by_header:<HEADER> <Quantity>\n```"
+        f"\nAvailable headers: {', '.join(formatted)}",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎲 Random Header", callback_data="type:__RANDOM__")],
@@ -520,63 +490,59 @@ random_header = await pick_random_header(has_extra_info, None)
 
 
 
-@router.callback_query(F.data == "back_to_types")
-async def back_to_types(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    has_extra_info = data.get("is_full_info", False)
-    kb = await build_type_keyboard(has_extra_info)
-    await state.set_state(PurchaseState.waiting_for_type)
-    await callback.message.edit_text("Select a Type (or Random):", reply_markup=kb)
-    await callback.answer()
 
 
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data.startswith("confirm"))
 async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext):
     """
-    Generates a NOWPayments invoice, but first enforces:
+    Generates a NOWPayments invoice for legitimate digital goods, enforcing:
       1) A fiat MINIMUM_USD threshold
-      2) Live stock availability for the chosen BIN
+      2) Live stock availability for the chosen SKU (previously 'bin')
 
-    If constraints aren't met, shows the user actionable buttons to adjust quantity,
-    pick another BIN, or cancel. Otherwise, creates the invoice (with retries),
-    saves the order, and returns a payment URL or raw payment details.
+    If constraints aren't met, shows buttons to adjust quantity, pick another SKU,
+    or cancel. Otherwise, creates the invoice (with retries), saves the order, and
+    returns a payment URL (or manual payment details if URL missing).
     """
     data = await state.get_data()
-    bin_header = data.get("bin")
+
+    # Backward-compat: accept either 'sku' or legacy 'bin' key
+    sku = data.get("sku") or data.get("bin")
     quantity = int(data.get("quantity", 1))
     total_price = float(data.get("price", 0.0))
     user_id = data.get("user_id")
-    is_full_info = data.get("is_full_info", False)
+    is_full_info = data.get("is_full_info", False)  # keep if your pricing differs
 
     # Defensive validation
-    if not bin_header or not user_id:
+    if not sku or not user_id:
         await callback.answer("Order data missing — please start again.", show_alert=True)
         await state.clear()
         return
 
     # --- Enforce MINIMUM_USD ---
-    unit_price = float(data.get("unit_price", KEY_PRICE_INFOLESS if not is_full_info else KEY_PRICE_FULL))
+    unit_price = float(
+        data.get("unit_price", KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS)
+    )
     if unit_price <= 0:
-        unit_price = KEY_PRICE_INFOLESS if not is_full_info else KEY_PRICE_FULL
+        unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
 
     if total_price < MINIMUM_USD:
         import math
         needed_qty = max(1, int(math.ceil(MINIMUM_USD / unit_price)))
         increase_by = max(needed_qty - quantity, 0)
 
-        # Check if the BIN can even reach the minimum given current stock
-    data_for_recheck = await state.get_data()
-selected_type = data_for_recheck.get("selected_type")
-available_stock = await check_stock_count_filtered(bin_header, is_full_info, selected_type)
+        # Respect the selected type/category when checking available stock
+        data_for_min = await state.get_data()
+        selected_type = data_for_min.get("selected_type")
+        available_stock = await check_stock_count_filtered(sku, is_full_info, selected_type)
 
         if needed_qty > available_stock:
-            # This BIN cannot reach the minimum at all
+            # Cannot reach the minimum with this SKU
             msg = (
                 f"⚠️ *Minimum payment required*\n\n"
                 f"Provider minimum: *${MINIMUM_USD:.2f}*.\n"
                 f"Your total: *${total_price:.2f}* for *{quantity}* "
-                f"{'Key' if quantity == 1 else 'Keys'} (unit: ${unit_price:.2f}).\n\n"
-                f"BIN `{bin_header}` has only *{available_stock}* in stock, "
+                f"{'item' if quantity == 1 else 'items'} (unit: ${unit_price:.2f}).\n\n"
+                f"SKU `{sku}` has only *{available_stock}* in stock, "
                 f"but you would need *{needed_qty}* to meet the minimum.\n\n"
                 "Choose an option:"
             )
@@ -584,28 +550,36 @@ available_stock = await check_stock_count_filtered(bin_header, is_full_info, sel
             if available_stock > 0:
                 rows.append([
                     InlineKeyboardButton(
-                        text=f"Use {available_stock} (max for this BIN)",
+                        text=f"Use {available_stock} (max for this SKU)",
                         callback_data=f"set_qty:{available_stock}"
                     )
                 ])
-            rows.append([InlineKeyboardButton(text="Choose another BIN", callback_data="back_to_type")])
+            rows.append([InlineKeyboardButton(text="Choose another SKU", callback_data="back_to_types")])
             rows.append([InlineKeyboardButton(text="Cancel order", callback_data="cancel_invoice")])
 
             try:
-                await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
+                await callback.message.edit_text(
+                    msg,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+                    parse_mode="Markdown"
+                )
             except Exception:
-                await callback.message.answer(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
+                await callback.message.answer(
+                    msg,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+                    parse_mode="Markdown"
+                )
             await callback.answer()
             return
         else:
-            # BIN can reach the minimum: offer exact increase and +1
+            # Can reach the minimum — offer exact increase and +1
             msg = (
                 f"⚠️ *Minimum payment required*\n\n"
                 f"Provider minimum: *${MINIMUM_USD:.2f}*.\n"
                 f"Your total: *${total_price:.2f}* for *{quantity}* "
-                f"{'Key' if quantity == 1 else 'Keys'} (unit: ${unit_price:.2f}).\n\n"
+                f"{'item' if quantity == 1 else 'items'} (unit: ${unit_price:.2f}).\n\n"
                 f"To reach the minimum you need at least *{needed_qty}* "
-                f"{'Key' if needed_qty == 1 else 'Keys'} (increase by {increase_by}).\n\n"
+                f"{'item' if needed_qty == 1 else 'items'} (increase by {increase_by}).\n\n"
                 "Choose an action:"
             )
             rows = []
@@ -620,24 +594,35 @@ available_stock = await check_stock_count_filtered(bin_header, is_full_info, sel
             rows.append([InlineKeyboardButton(text="❌ Cancel order", callback_data="cancel_invoice")])
 
             try:
-                await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
+                await callback.message.edit_text(
+                    msg,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+                    parse_mode="Markdown"
+                )
             except Exception:
-                await callback.message.answer(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
+                await callback.message.answer(
+                    msg,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+                    parse_mode="Markdown"
+                )
             await callback.answer()
             return
 
-    # --- Live stock re-check (in case stock changed since confirmation screen) ---
-    available_stock = await check_stock_count(bin_header, is_full_info)
+    # --- Live stock re-check (in case stock changed since confirmation) ---
+    data_for_recheck = await state.get_data()
+    selected_type = data_for_recheck.get("selected_type")
+    available_stock = await check_stock_count_filtered(sku, is_full_info, selected_type)
+
     if quantity > available_stock:
         msg = (
-            f"⚠️ Stock changed for BIN `{bin_header}`.\n"
+            f"⚠️ Stock changed for SKU `{sku}`.\n"
             f"Available now: *{available_stock}* | Requested: *{quantity}*.\n\n"
             "Choose an option:"
         )
         kb_rows = []
         if available_stock > 0:
             kb_rows.append([InlineKeyboardButton(text=f"Use {available_stock}", callback_data=f"set_qty:{available_stock}")])
-        kb_rows.append([InlineKeyboardButton(text="Choose another BIN", callback_data="back_to_type")])
+        kb_rows.append([InlineKeyboardButton(text="Choose another SKU", callback_data="back_to_types")])
         kb_rows.append([InlineKeyboardButton(text="Cancel order", callback_data="cancel_invoice")])
 
         await callback.message.edit_text(
@@ -649,7 +634,7 @@ available_stock = await check_stock_count_filtered(bin_header, is_full_info, sel
         return
 
     # --- Create the invoice with retries ---
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def extract_payment_url(resp: dict) -> Optional[str]:
         if not isinstance(resp, dict):
@@ -687,24 +672,24 @@ available_stock = await check_stock_count_filtered(bin_header, is_full_info, sel
                     _run_sync_invoice_creation,
                     total_price=total_price,
                     user_id=user_id,
-                    bin_header=bin_header,
+                    bin_header=sku,     # backward-compat: your helper still expects bin_header
                     quantity=quantity
                 )
             )
             logger.info(f"NOWPayments create_payment response (attempt {attempt}): {invoice_response}")
 
-            # Save raw response for later analysis
+            # Cache raw response
             try:
                 await state.update_data(raw_invoice_response=invoice_response)
             except Exception:
                 logger.debug("Failed to save raw_invoice_response to state.")
 
-            # Save order in DB
+            # Save order in DB (use 'sku' in your schema; if your DB still uses key_header, pass sku there)
             try:
                 await save_order(
                     order_id=invoice_response.get("order_id"),
                     user_id=user_id,
-                    key_header=bin_header,
+                    key_header=sku,             # rename to 'sku' in DB when you migrate
                     quantity=quantity,
                     is_full_info=is_full_info,
                     status="pending"
@@ -730,7 +715,9 @@ available_stock = await check_stock_count_filtered(bin_header, is_full_info, sel
     # --- Render result to the user ---
     try:
         if not invoice_response:
-            logger.error(f"NOWPayments create_payment returned no response after {max_attempts} attempts for user {user_id}")
+            logger.error(
+                f"NOWPayments create_payment returned no response after {max_attempts} attempts for user {user_id}"
+            )
             try:
                 await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
             except Exception:
@@ -757,7 +744,7 @@ available_stock = await check_stock_count_filtered(bin_header, is_full_info, sel
         )
 
         if payment_url:
-            final_message += "Click the button below to complete payment and receive your keys instantly."
+            final_message += "Click the button below to complete payment and receive your items instantly."
             payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="Pay Now", url=payment_url)]
             ])
@@ -788,7 +775,9 @@ available_stock = await check_stock_count_filtered(bin_header, is_full_info, sel
                     "Tap the button below to view exact payment details (address, amount and network) so you can pay manually.\n\n"
                     f"If you need help, contact support ({support_contact})."
                 )
-                cb_invoice_identifier = invoice_id if invoice_id != "N/A" else (invoice_response.get("payment_id") or invoice_response.get("pay_id") or "unknown")
+                cb_invoice_identifier = invoice_id if invoice_id != "N/A" else (
+                    invoice_response.get("payment_id") or invoice_response.get("pay_id") or "unknown"
+                )
                 payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="Show Payment Details", callback_data=f"show_payment:{cb_invoice_identifier}")]
                 ])
@@ -847,36 +836,30 @@ async def increase_qty_callback(callback: CallbackQuery, state: FSMContext):
             await callback.answer("No pending order found.", show_alert=True)
             return
 
-        bin_header = data.get("bin")
+        sku = data.get("sku") or data.get("bin")
         is_full_info = data.get("is_full_info", False)
         unit_price = float(data.get("unit_price", KEY_PRICE_INFOLESS))
 
-        # desired new quantity
         requested_qty = int(data.get("quantity", 1)) + inc
 
-        # re-check live stock for this BIN
-  selected_type = data.get("selected_type")
-available_stock = await check_stock_count_filtered(bin_header, is_full_info, selected_type)
+        selected_type = data.get("selected_type")
+        available_stock = await check_stock_count_filtered(sku, is_full_info, selected_type)
 
         if requested_qty > available_stock:
-            # Build a helpful message + choices
             msg = (
-                f"⚠️ Not enough stock for BIN `{bin_header}`.\n"
+                f"⚠️ Not enough stock for SKU `{sku}`.\n"
                 f"Available: *{available_stock}* | Requested: *{requested_qty}*.\n\n"
                 "Choose an option below:"
             )
             kb_rows = []
-
             if available_stock > 0:
-                # button to cap at available
                 kb_rows.append([
                     InlineKeyboardButton(
                         text=f"Use {available_stock} (max available)",
                         callback_data=f"set_qty:{available_stock}"
                     )
                 ])
-            # let user pick another BIN or cancel
-            kb_rows.append([InlineKeyboardButton(text="Choose another BIN", callback_data="back_to_type")])
+            kb_rows.append([InlineKeyboardButton(text="Choose another SKU", callback_data="back_to_types")])
             kb_rows.append([InlineKeyboardButton(text="Cancel order", callback_data="cancel_invoice")])
 
             await callback.message.edit_text(
@@ -887,7 +870,6 @@ available_stock = await check_stock_count_filtered(bin_header, is_full_info, sel
             await callback.answer()
             return
 
-        # OK: within stock, update and regenerate
         total_price = requested_qty * unit_price
         await state.update_data(quantity=requested_qty, price=total_price)
         await callback.answer("Quantity updated — regenerating invoice…", show_alert=False)
@@ -896,6 +878,7 @@ available_stock = await check_stock_count_filtered(bin_header, is_full_info, sel
     except Exception:
         logger.exception("Failed to increase quantity and regenerate invoice.")
         await callback.answer("Failed to update quantity. Try again.", show_alert=True)
+
 
 
 
@@ -948,7 +931,7 @@ async def show_payment_callback(callback: CallbackQuery, state: FSMContext):
 
         # If cached response is missing details, fetch from NOWPayments with brief retries
         if not (pay_address and pay_amount):
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             tries = 0
             last_exc = None
             while tries < 3:
