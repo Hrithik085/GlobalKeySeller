@@ -100,14 +100,17 @@ async def initialize_db():
 
 
 
-async def add_key(key_detail: str, key_header: str, is_full_info: bool):
+# replace your current add_key with this
+async def add_key(key_detail: str, key_header: str, is_full_info: bool, card_type: str = "unknown"):
     """Add a single key to the card_inventory table."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO card_inventory (key_detail, key_header, is_full_info) VALUES ($1, $2, $3)",
-            key_detail, key_header, is_full_info
+            "INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold, type) "
+            "VALUES ($1, $2, $3, FALSE, $4)",
+            key_detail, key_header, is_full_info, card_type
         )
+
 
 async def check_stock_count(key_header: str, is_full_info: bool) -> int:
     """Returns the count of UNSOLD cards for a specific BIN and type."""
@@ -308,37 +311,37 @@ async def populate_initial_keys():
     """Populate the card_inventory table with sample keys, some sold and some unsold."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # Clear the table first
         await conn.execute("TRUNCATE TABLE card_inventory RESTART IDENTITY CASCADE")
         print("Cleared existing card inventory.")
 
-        # --- Full Info Keys ---
+        # (key_detail, key_header, is_full_info, sold, type)
         full_info_keys = [
-            ("456456xxxxxxxxxx|09/27|123|John Doe|NY", "456456", True, False),  # available
-            ("456456xxxxxxxxxx|08/26|456|Jane Doe|CA", "456456", True, True),   # sold
-            ("123123xxxxxxxxxx|07/25|789|Alice Smith|TX", "123123", True, False),
-            ("987654xxxxxxxxxx|10/28|321|Bob Brown|FL", "987654", True, True),
-            ("321321xxxxxxxxxx|06/26|654|Charlie Lee|WA", "321321", True, False),
+            ("456456xxxxxxxxxx|09/27|123|John Doe|NY",       "456456", True,  False, "AB"),
+            ("456456xxxxxxxxxx|08/26|456|Jane Doe|CA",       "456456", True,  True,  "AB"),
+            ("123123xxxxxxxxxx|07/25|789|Alice Smith|TX",    "123123", True,  False, "BC"),
+            ("987654xxxxxxxxxx|10/28|321|Bob Brown|FL",      "987654", True,  True,  "CD"),
+            ("321321xxxxxxxxxx|06/26|654|Charlie Lee|WA",    "321321", True,  False, "AB"),
         ]
 
-        # --- Info-less Keys ---
         info_less_keys = [
-            ("543210xxxxxxxxxx|12/25|789", "543210", False, False),
-            ("543210xxxxxxxxxx|11/24|012", "543210", False, True),
-            ("678901xxxxxxxxxx|01/26|345", "678901", False, False),
-            ("345678xxxxxxxxxx|02/27|678", "345678", False, True),
-            ("789012xxxxxxxxxx|03/28|901", "789012", False, False),
+            ("543210xxxxxxxxxx|12/25|789",                   "543210", False, False, "AB"),
+            ("543210xxxxxxxxxx|11/24|012",                   "543210", False, True,  "AB"),
+            ("678901xxxxxxxxxx|01/26|345",                   "678901", False, False, "BC"),
+            ("345678xxxxxxxxxx|02/27|678",                   "345678", False, True,  "CD"),
+            ("789012xxxxxxxxxx|03/28|901",                   "789012", False, False, "CD"),
         ]
 
         all_keys = full_info_keys + info_less_keys
 
-        for key_detail, key_header, is_full_info, sold in all_keys:
+        # insert with type
+        for key_detail, key_header, is_full_info, sold, item_type in all_keys:
             await conn.execute(
-                "INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold) VALUES ($1, $2, $3, $4)",
-                key_detail, key_header, is_full_info, sold
+                "INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold, type) "
+                "VALUES ($1, $2, $3, $4, $5)",
+                key_detail, key_header, is_full_info, sold, item_type
             )
 
-        print("Card inventory population complete with some sold and some available keys.")
+        print("Card inventory population complete with some sold and some available keys (with types).")
 
 
 
