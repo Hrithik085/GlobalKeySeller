@@ -207,43 +207,175 @@ async def update_order_status(order_id: str, status: str):
         """, status, order_id)
         
 # --- Population Logic ---
+# --- New queries for type menus and random pricing/fulfillment ---
 
-async def populate_initial_keys():
-    """Populate the card_inventory table with sample keys, some sold and some unsold."""
+async def fetch_types_with_count(is_full_info: bool) -> List[Tuple[str, int]]:
+    """Distinct types with counts for unsold rows of given full-info flag."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # Clear the table first
-        await conn.execute("TRUNCATE TABLE card_inventory RESTART IDENTITY CASCADE")
-        print("Cleared existing card inventory.")
+        rows = await conn.fetch("""
+            SELECT type, COUNT(*) AS count
+            FROM card_inventory
+            WHERE is_full_info = $1 AND sold = FALSE
+            GROUP BY type
+            HAVING COUNT(*) > 0
+            ORDER BY count DESC, type ASC
+        """, is_full_info)
+        return [(r["type"], r["count"]) for r in rows]
 
-        # --- Full Info Keys ---
-        full_info_keys = [
-            ("123123xxxxxxxxxx", "456456", True,  False, "AB"),
-            ("123123xxxxxxxxxx", "456456", True,  True,  "AB"),
-            ("123123xxxxxxxxxx", "123123", True,  False, "BC"),
-            ("123123xxxxxxxxxx", "987654", True,  True,  "CD"),
-            ("123123xxxxxxxxxx", "321321", True,  False, "AB"),
-        ]
+async def fetch_bins_by_type_with_count(is_full_info: bool, card_type: str) -> List[Tuple[str, int]]:
+    """BIN headers and counts within a type."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT key_header, COUNT(*) AS count
+            FROM card_inventory
+            WHERE is_full_info = $1 AND sold = FALSE AND type = $2
+            GROUP BY key_header
+            HAVING COUNT(*) > 0
+            ORDER BY count DESC, key_header ASC
+        """, is_full_info, card_type)
+        return [(r["key_header"], r["count"]) for r in rows]
 
-        # --- Info-less Keys ---
-        info_less_keys = [
-            ("123123xxxxxxxxxx", "543210", False, False, "AB"),
-            ("123123xxxxxxxxxx", "543210", False, True,  "AB"),
-            ("123123xxxxxxxxxx", "678901", False, False, "BC"),
-            ("123123xxxxxxxxxx", "345678", False, True,  "CD"),
-            ("123123xxxxxxxxxx", "789012", False, False, "CD"),
-        ]
+async def quote_random_prices(is_full_info: bool, quantity: int, card_type: Optional[str] = None) -> List[float]:
+    """
+    Preview only: sample random rows (unsold) to compute a price quote.
+    Does NOT mark sold. Use for pre-invoice totals.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT price
+            FROM card_inventory
+            WHERE is_full_info = $1
+              AND sold = FALSE
+              AND ($3::text IS NULL OR type = $3)
+            ORDER BY random()
+            LIMIT $2
+        """, is_full_info, quantity, card_type)
+        return [float(r["price"]) for r in rows]
 
-        all_keys = full_info_keys + info_less_keys
-
-        for key_detail, key_header, is_full_info, sold, card_type in all_keys:
-            await conn.execute(
-                "INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold, type) "
-                "VALUES ($1, $2, $3, $4, $5)",
-                key_detail, key_header, is_full_info, sold, card_type
+async def get_random_keys_and_mark_sold(is_full_info: bool, quantity: int, card_type: Optional[str] = None) -> List[dict]:
+    """
+    Atomically pick random keys and mark them sold. Returns [{key_detail, price}, ...].
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        rows = await conn.fetch("""
+            WITH picked AS (
+                SELECT id
+                FROM card_inventory
+                WHERE is_full_info = $1
+                  AND sold = FALSE
+                  AND ($3::text IS NULL OR type = $3)
+                ORDER BY random()
+                FOR UPDATE SKIP LOCKED
+                LIMIT $2
             )
+            UPDATE card_inventory c
+            SET sold = TRUE
+            FROM picked p
+            WHERE c.id = p.id
+            RETURNING c.key_detail, c.price
+        """, is_full_info, quantity, card_type)
+        if len(rows) < quantity:
+            return []
+        return [{"key_detail": r["key_detail"], "price": float(r["price"])} for r in rows]
 
-        print("Card inventory population complete with some sold and some available keys.")
+
+async def populate_initial_keys():
+    """
+    Seed the DB with a diverse set of rows to exercise:
+      - Full Info + Info-less
+      - Multiple types (AB/BC/CD/EF)
+      - Variable price (used by random full-info pricing only)
+      - Sold vs unsold
+      - Stock-shortage and 'no stock' BINs
+      - Exact and below-minimum price totals
+
+    Notes:
+      • For BIN/header purchases you use config price (KEY_PRICE_*), not this 'price' column.
+      • For RANDOM Full Info purchases, your code sums the 'price' column.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Clear tables
+        await conn.execute("TRUNCATE TABLE card_inventory RESTART IDENTITY CASCADE")
+        await conn.execute("TRUNCATE TABLE orders RESTART IDENTITY CASCADE")
+
+        # Format: (key_detail, key_header, is_full_info, sold, type, price)
+        rows = [
+            # ---------- FULL INFO (used by both BIN flow & RANDOM flow) ----------
+            # BIN 456456 (type AB): 2 UNSOLD @ $5 (test: stock shortage if ask >2; BIN flow min $15 => need 3)
+            ("FI-456456-1-AB", "456456", True,  False, "AB", 5.00),
+            ("FI-456456-2-AB", "456456", True,  False, "AB", 5.00),
+            # also include some SOLD to ensure they are ignored
+            ("FI-456456-X-AB", "456456", True,  True,  "AB", 5.00),
+
+            # BIN 777777 (type AB): 4 UNSOLD @ $3 (BIN flow needs qty>=5 to reach $15; tests 'increase to' path)
+            ("FI-777777-1-AB", "777777", True,  False, "AB", 3.00),
+            ("FI-777777-2-AB", "777777", True,  False, "AB", 3.00),
+            ("FI-777777-3-AB", "777777", True,  False, "AB", 3.00),
+            ("FI-777777-4-AB", "777777", True,  False, "AB", 3.00),
+
+            # BIN 888888 (type AB): 1 UNSOLD @ $20 (BIN flow: single unit already over $15)
+            ("FI-888888-1-AB", "888888", True,  False, "AB", 20.00),
+
+            # Type BC (random tests): MIXED PRICES so random sum can be < or > $15
+            ("FI-123123-1-BC", "123123", True,  False, "BC", 4.00),
+            ("FI-123123-2-BC", "123123", True,  False, "BC", 6.00),
+            ("FI-124124-1-BC", "124124", True,  False, "BC", 8.00),
+            ("FI-124124-X-BC", "124124", True,  True,  "BC", 8.00),   # SOLD
+
+            # Type CD: a bunch unsold for random-any or random-by-type
+            ("FI-321321-1-CD", "321321", True,  False, "CD", 2.50),
+            ("FI-321321-2-CD", "321321", True,  False, "CD", 2.50),
+            ("FI-654654-1-CD", "654654", True,  False, "CD", 12.50),
+
+            # Type EF: create a header with NO UNSOLD (all sold) to test 'no stock in type'
+            ("FI-999999-X-EF", "999999", True, True, "EF", 5.00),
+            ("FI-999999-Y-EF", "999999", True, True, "EF", 7.00),
+
+            # ---------- INFO-LESS (BIN flow uses KEY_PRICE_INFOLESS; price column unused) ----------
+            # BIN 543210 (type AB): many unsold
+            ("IL-543210-1-AB", "543210", False, False, "AB", 1.00),
+            ("IL-543210-2-AB", "543210", False, False, "AB", 1.00),
+            ("IL-543210-3-AB", "543210", False, False, "AB", 1.00),
+            ("IL-543210-4-AB", "543210", False, False, "AB", 1.00),
+            ("IL-543210-5-AB", "543210", False, False, "AB", 1.00),
+            # BIN 678901 (type BC): some sold, some unsold
+            ("IL-678901-1-BC", "678901", False, False, "BC", 1.00),
+            ("IL-678901-X-BC", "678901", False, True,  "BC", 1.00),
+            # BIN 789012 (type CD): edge small stock
+            ("IL-789012-1-CD", "789012", False, False, "CD", 1.00),
+        ]
+
+        await conn.executemany(
+            """
+            INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold, type, price)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            rows
+        )
+        print("Seeded card_inventory with diverse test data.")
+
+async def print_inventory_summary():
+    """Optional: quick view of what’s in inventory after seeding."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        print("\n=== INVENTORY SUMMARY ===")
+        rows = await conn.fetch("""
+            SELECT is_full_info, type, key_header,
+                   COUNT(*) FILTER (WHERE sold = FALSE) AS unsold,
+                   COUNT(*) FILTER (WHERE sold = TRUE)  AS sold
+            FROM card_inventory
+            GROUP BY is_full_info, type, key_header
+            ORDER BY is_full_info DESC, type, key_header
+        """)
+        for r in rows:
+            label = "FULL" if r["is_full_info"] else "INFOLESS"
+            print(f"{label:7} | type={r['type']:>2} | header={r['key_header']:>6} | unsold={r['unsold']:>2} | sold={r['sold']:>2}")
+        print("==========================\n")
 
 
 
