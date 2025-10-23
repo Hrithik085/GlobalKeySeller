@@ -47,18 +47,15 @@ async def get_pool() -> asyncpg.Pool:
         )
     return _pool
 
-async def get_raw_connection_params(url: str) -> dict:
-    """Parses the Render DATABASE_URL into individual components."""
+def get_raw_connection_params(url: str) -> dict:
     parsed = urlparse(url)
-    
     return {
         'user': parsed.username,
         'password': parsed.password,
         'host': parsed.hostname,
         'port': parsed.port or 5432,
-        'database': parsed.path.lstrip('/'),
+        'database': (parsed.path or '/').lstrip('/'),
     }
-
 
 # --- Database Schema Functions ---
 
@@ -75,7 +72,9 @@ async def initialize_db():
                 key_detail TEXT NOT NULL,
                 key_header TEXT NOT NULL,
                 is_full_info BOOLEAN NOT NULL,
-                sold BOOLEAN NOT NULL DEFAULT FALSE
+                sold BOOLEAN NOT NULL DEFAULT FALSE,
+                  type TEXT NOT NULL DEFAULT 'unknown',
+                  price NUMERIC(10,2) NOT NULL DEFAULT 5.00
             )
         """)
         print("PostgreSQL Database table 'card_inventory' created/reset successfully.")
@@ -90,6 +89,7 @@ async def initialize_db():
                 key_header TEXT NOT NULL,
                 quantity INT NOT NULL,
                 is_full_info BOOLEAN NOT NULL,
+                type TEXT NOT NULL DEFAULT 'unknown',
                 fulfilled BOOLEAN NOT NULL DEFAULT FALSE,
                 status TEXT DEFAULT 'pending'
             )
@@ -108,7 +108,7 @@ async def add_key(key_detail: str, key_header: str, is_full_info: bool):
         )
 
 async def check_stock_count(key_header: str, is_full_info: bool) -> int:
-    """Returns the count of UNSOLD cards for a specific BIN and type."""
+    """Returns the count of UNSOLD cards for a specific CODE and type."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         count = await conn.fetchval("""
@@ -118,7 +118,7 @@ async def check_stock_count(key_header: str, is_full_info: bool) -> int:
         return count if count is not None else 0
 
 
-async def find_available_bins(is_full_info: bool) -> List[str]:
+async def find_available_codes(is_full_info: bool) -> List[str]:
     """Return distinct key_header values for unsold cards of the given type."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -128,7 +128,7 @@ async def find_available_bins(is_full_info: bool) -> List[str]:
         )
         return [r["key_header"] for r in rows]
 
-async def fetch_bins_with_count(is_full_info: bool) -> List[Tuple[str, int]]:
+async def fetch_codes_with_count(is_full_info: bool) -> List[Tuple[str, int]]:
     """Returns a list of tuples: [(BIN_HEADER, COUNT), ...]."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -197,11 +197,9 @@ async def save_order(order_id: str, user_id: int, key_header: str, quantity: int
 async def mark_order_fulfilled(order_id: str):
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE orders
-            SET fulfilled = TRUE
-            WHERE order_id = $1
-        """, order_id)
+await conn.execute(
+    "UPDATE orders SET fulfilled = TRUE, status = 'paid' WHERE order_id = $1", order_id
+)
 
 
 async def update_order_status(order_id: str, status: str):
@@ -226,30 +224,30 @@ async def populate_initial_keys():
 
         # --- Full Info Keys ---
         full_info_keys = [
-            ("456456xxxxxxxxxx|09/27|123|John Doe|NY", "456456", True, False),  # available
-            ("456456xxxxxxxxxx|08/26|456|Jane Doe|CA", "456456", True, True),   # sold
-            ("123123xxxxxxxxxx|07/25|789|Alice Smith|TX", "123123", True, False),
-            ("987654xxxxxxxxxx|10/28|321|Bob Brown|FL", "987654", True, True),
-            ("321321xxxxxxxxxx|06/26|654|Charlie Lee|WA", "321321", True, False),
+            ("123123xxxxxxxxxx",       "456456", True,  False, "AB"),
+          ("123123xxxxxxxxxx",        "456456", True,  True,  "AB"),
+                 ("123123xxxxxxxxxx",     "123123", True,  False, "BC"),
+             ("123123xxxxxxxxxx",       "987654", True,  True,  "CD"),
+           ("123123xxxxxxxxxx",    "321321", True,  False, "AB"),
         ]
 
         # --- Info-less Keys ---
         info_less_keys = [
-            ("543210xxxxxxxxxx|12/25|789", "543210", False, False),
-            ("543210xxxxxxxxxx|11/24|012", "543210", False, True),
-            ("678901xxxxxxxxxx|01/26|345", "678901", False, False),
-            ("345678xxxxxxxxxx|02/27|678", "345678", False, True),
-            ("789012xxxxxxxxxx|03/28|901", "789012", False, False),
+        ("123123xxxxxxxxxx",                    "543210", False, False, "AB"),
+        ("123123xxxxxxxxxx",                    "543210", False, True,  "AB"),
+        ("123123xxxxxxxxxx",                    "678901", False, False, "BC"),
+        ("123123xxxxxxxxxx",                    "345678", False, True,  "CD"),
+        ("123123xxxxxxxxxx",                    "789012", False, False, "CD"),
         ]
 
         all_keys = full_info_keys + info_less_keys
 
-        for key_detail, key_header, is_full_info, sold in all_keys:
-            await conn.execute(
-                "INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold) VALUES ($1, $2, $3, $4)",
-                key_detail, key_header, is_full_info, sold
-            )
-
+       for key_detail, key_header, is_full_info, sold, card_type in all_keys:
+           await conn.execute(
+               "INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold, type) "
+               "VALUES ($1, $2, $3, $4, $5)",
+               key_detail, key_header, is_full_info, sold, card_type
+           )
         print("Card inventory population complete with some sold and some available keys.")
 
 
