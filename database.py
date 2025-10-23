@@ -63,13 +63,13 @@ async def get_raw_connection_params(url: str) -> dict:
 # --- Database Schema Functions ---
 
 async def initialize_db():
-    """Create or reset the card_inventory and orders tables with correct schema."""
+    """Create or reset the giftCard_inventory and orders tables with correct schema."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # --- Drop and create card_inventory table ---
+        # --- Drop and create giftCard_inventory table ---
         await conn.execute("""
-            DROP TABLE IF EXISTS card_inventory;
-CREATE TABLE card_inventory (
+            DROP TABLE IF EXISTS giftCard_inventory;
+CREATE TABLE giftCard_inventory (
   id SERIAL PRIMARY KEY,
   key_detail TEXT NOT NULL,
   key_header TEXT NOT NULL,
@@ -79,7 +79,7 @@ CREATE TABLE card_inventory (
   price NUMERIC(10,2) NOT NULL DEFAULT 5.00
 );
         """)
-        print("PostgreSQL Database table 'card_inventory' created/reset successfully.")
+        print("PostgreSQL Database table 'giftCard_inventory' created/reset successfully.")
 
         # --- Drop and create orders table with status column ---
         await conn.execute("""
@@ -112,7 +112,7 @@ sync def add_key(
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold, type, price)
+            INSERT INTO giftCard_inventory (key_detail, key_header, is_full_info, sold, type, price)
             VALUES ($1, $2, $3, FALSE, $4, $5)
             """,
             key_detail, key_header, is_full_info, card_type, price
@@ -124,7 +124,7 @@ async def fetch_price_for_header(header: str, has_extra_info: bool, item_type: O
         if item_type:
             return await conn.fetchval(
                 """
-                SELECT price FROM card_inventory
+                SELECT price FROM giftCard_inventory
                 WHERE key_header=$1 AND is_full_info=$2 AND sold=FALSE AND type=$3
                 GROUP BY price
                 ORDER BY COUNT(*) DESC, price ASC
@@ -133,7 +133,7 @@ async def fetch_price_for_header(header: str, has_extra_info: bool, item_type: O
             )
         return await conn.fetchval(
             """
-            SELECT price FROM card_inventory
+            SELECT price FROM giftCard_inventory
             WHERE key_header=$1 AND is_full_info=$2 AND sold=FALSE
             GROUP BY price
             ORDER BY COUNT(*) DESC, price ASC
@@ -143,11 +143,11 @@ async def fetch_price_for_header(header: str, has_extra_info: bool, item_type: O
 
 
 async def check_stock_count(key_header: str, is_full_info: bool) -> int:
-    """Returns the count of UNSOLD cards for a specific BIN and type."""
+    """Returns the count of UNSOLD cards for a specific code and type."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         count = await conn.fetchval("""
-            SELECT COUNT(*) FROM card_inventory 
+            SELECT COUNT(*) FROM giftCard_inventory 
             WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
         """, key_header, is_full_info)
         return count if count is not None else 0
@@ -158,7 +158,7 @@ async def find_available_bins(is_full_info: bool) -> List[str]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT DISTINCT key_header FROM card_inventory WHERE is_full_info = $1 AND sold = FALSE",
+            "SELECT DISTINCT key_header FROM giftCard_inventory WHERE is_full_info = $1 AND sold = FALSE",
             is_full_info
         )
         return [r["key_header"] for r in rows]
@@ -169,7 +169,7 @@ async def fetch_bins_with_count(is_full_info: bool) -> List[Tuple[str, int]]:
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT key_header, COUNT(key_header) as count
-            FROM card_inventory 
+            FROM giftCard_inventory 
             WHERE is_full_info = $1 AND sold = FALSE
             GROUP BY key_header
             HAVING COUNT(key_header) > 0
@@ -190,7 +190,7 @@ async def get_key_and_mark_sold(key_header: str, is_full_info: bool, quantity: i
             # 1. Select the IDs and details of the required keys
             key_records = await conn.fetch("""
                 SELECT id, key_detail
-                FROM card_inventory
+                FROM giftCard_inventory
                 WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
                 LIMIT $3
                 FOR UPDATE
@@ -204,7 +204,7 @@ async def get_key_and_mark_sold(key_header: str, is_full_info: bool, quantity: i
 
             # 2. Mark the selected keys as sold
             await conn.executemany("""
-                UPDATE card_inventory
+                UPDATE giftCard_inventory
                 SET sold = TRUE
                 WHERE id = $1
             """, [(id,) for id in key_ids])
@@ -261,7 +261,7 @@ async def fetch_available_types(has_extra_info: bool) -> List[Tuple[str, int]]:
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT type, COUNT(*) AS count
-            FROM card_inventory
+            FROM giftCard_inventory
             WHERE is_full_info = $1 AND sold = FALSE
             GROUP BY type
             HAVING COUNT(*) > 0
@@ -278,7 +278,7 @@ async def fetch_bins_with_count_by_type(has_extra_info: bool, item_type: Optiona
         if item_type:
             rows = await conn.fetch("""
                 SELECT key_header, COUNT(*) AS count
-                FROM card_inventory
+                FROM giftCard_inventory
                 WHERE is_full_info = $1 AND sold = FALSE AND type = $2
                 GROUP BY key_header
                 HAVING COUNT(*) > 0
@@ -287,7 +287,7 @@ async def fetch_bins_with_count_by_type(has_extra_info: bool, item_type: Optiona
         else:
             rows = await conn.fetch("""
                 SELECT key_header, COUNT(*) AS count
-                FROM card_inventory
+                FROM giftCard_inventory
                 WHERE is_full_info = $1 AND sold = FALSE
                 GROUP BY key_header
                 HAVING COUNT(*) > 0
@@ -300,11 +300,11 @@ async def check_stock_count_filtered(header: str, has_extra_info: bool, item_typ
     async with pool.acquire() as conn:
         if item_type:
             return await conn.fetchval("""
-                SELECT COUNT(*) FROM card_inventory
+                SELECT COUNT(*) FROM giftCard_inventory
                 WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE AND type = $3
             """, header, has_extra_info, item_type) or 0
         return await conn.fetchval("""
-            SELECT COUNT(*) FROM card_inventory
+            SELECT COUNT(*) FROM giftCard_inventory
             WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
         """, header, has_extra_info) or 0
 
@@ -317,7 +317,7 @@ async def pick_random_header(has_extra_info: bool, item_type: Optional[str]) -> 
         if item_type:
             row = await conn.fetchrow("""
                 SELECT key_header
-                FROM card_inventory
+                FROM giftCard_inventory
                 WHERE is_full_info = $1 AND sold = FALSE AND type = $2
                 GROUP BY key_header
                 HAVING COUNT(*) > 0
@@ -327,7 +327,7 @@ async def pick_random_header(has_extra_info: bool, item_type: Optional[str]) -> 
         else:
             row = await conn.fetchrow("""
                 SELECT key_header
-                FROM card_inventory
+                FROM giftCard_inventory
                 WHERE is_full_info = $1 AND sold = FALSE
                 GROUP BY key_header
                 HAVING COUNT(*) > 0
@@ -338,27 +338,27 @@ async def pick_random_header(has_extra_info: bool, item_type: Optional[str]) -> 
 
 
 async def populate_initial_keys():
-    """Populate the card_inventory table with sample keys, some sold and some unsold."""
+    """Populate the giftCard_inventory table with sample keys, some sold and some unsold."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute("TRUNCATE TABLE card_inventory RESTART IDENTITY CASCADE")
+        await conn.execute("TRUNCATE TABLE giftCard_inventory RESTART IDENTITY CASCADE")
         print("Cleared existing card inventory.")
 
         # (key_detail, key_header, is_full_info, sold, type)
         full_info_keys = [
-            ("456456xxxxxxxxxx|09/27|123|John Doe|NY",       "456456", True,  False, "AB"),
-            ("456456xxxxxxxxxx|08/26|456|Jane Doe|CA",       "456456", True,  True,  "AB"),
-            ("123123xxxxxxxxxx|07/25|789|Alice Smith|TX",    "123123", True,  False, "BC"),
-            ("987654xxxxxxxxxx|10/28|321|Bob Brown|FL",      "987654", True,  True,  "CD"),
-            ("321321xxxxxxxxxx|06/26|654|Charlie Lee|WA",    "321321", True,  False, "AB"),
+            ("123123xxxxxxxxxx",       "456456", True,  False, "AB"),
+          ("123123xxxxxxxxxx",        "456456", True,  True,  "AB"),
+                 ("123123xxxxxxxxxx",     "123123", True,  False, "BC"),
+             ("123123xxxxxxxxxx",       "987654", True,  True,  "CD"),
+           ("123123xxxxxxxxxx",    "321321", True,  False, "AB"),
         ]
 
         info_less_keys = [
-            ("543210xxxxxxxxxx|12/25|789",                   "543210", False, False, "AB"),
-            ("543210xxxxxxxxxx|11/24|012",                   "543210", False, True,  "AB"),
-            ("678901xxxxxxxxxx|01/26|345",                   "678901", False, False, "BC"),
-            ("345678xxxxxxxxxx|02/27|678",                   "345678", False, True,  "CD"),
-            ("789012xxxxxxxxxx|03/28|901",                   "789012", False, False, "CD"),
+        ("123123xxxxxxxxxx",                    "543210", False, False, "AB"),
+        ("123123xxxxxxxxxx",                    "543210", False, True,  "AB"),
+        ("123123xxxxxxxxxx",                    "678901", False, False, "BC"),
+        ("123123xxxxxxxxxx",                    "345678", False, True,  "CD"),
+        ("123123xxxxxxxxxx",                    "789012", False, False, "CD"),
         ]
 
         all_keys = full_info_keys + info_less_keys
@@ -366,7 +366,7 @@ async def populate_initial_keys():
         # insert with type
         for key_detail, key_header, is_full_info, sold, item_type in all_keys:
             await conn.execute(
-                "INSERT INTO card_inventory (key_detail, key_header, is_full_info, sold, type) "
+                "INSERT INTO giftCard_inventory (key_detail, key_header, is_full_info, sold, type) "
                 "VALUES ($1, $2, $3, $4, $5)",
                 key_detail, key_header, is_full_info, sold, item_type
             )
