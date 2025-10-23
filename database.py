@@ -33,7 +33,8 @@ async def get_pool() -> asyncpg.Pool:
         ssl_ctx = build_ssl_context()
 
         # Parse URL into components for clean parameter passing
-params = get_raw_connection_params(DATABASE_URL)
+        # 🔑 FIX: Correctly indent this line and the following block.
+        params = get_raw_connection_params(DATABASE_URL)
 
         _pool = await asyncpg.create_pool(
             user=params['user'],
