@@ -30,9 +30,25 @@ from nowpayments import NOWPayments
 
 # --- Database and Config Imports ---
 from config import BOT_TOKEN, CURRENCY, KEY_PRICE_USD
-from database import initialize_db, populate_initial_keys, find_available_bins, get_pool, check_stock_count, fetch_bins_with_count, get_key_and_mark_sold, get_order_from_db, save_order , update_order_status, add_key,
- fetch_available_types, fetch_bins_with_count_by_type,
-    check_stock_count_filtered, pick_random_header
+from database import (
+    initialize_db,
+    populate_initial_keys,
+    find_available_bins,
+    get_pool,
+    check_stock_count,
+    fetch_bins_with_count,
+    get_key_and_mark_sold,
+    get_order_from_db,
+    save_order,
+    update_order_status,
+    add_key,
+    # NEW type-aware helpers:
+    fetch_available_types,
+    fetch_bins_with_count_by_type,
+    check_stock_count_filtered,
+    pick_random_header,
+)
+
 
 try:
     from config import KEY_PRICE_INFOLESS, KEY_PRICE_FULL
@@ -112,10 +128,9 @@ def get_key_type_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def get_confirmation_keyboard(bin_header: str, quantity: int) -> InlineKeyboardMarkup:
-    """Keyboard to confirm order or cancel after stock check."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Confirm & Invoice", callback_data=f"confirm:{bin_header}:{quantity}")],
-        [InlineKeyboardButton(text="⬅️ Change Command", callback_data="back_to_type")]
+        [InlineKeyboardButton(text="⬅️ Change Type", callback_data="back_to_types")]
     ])
 
 def _run_sync_get_payment_status(payment_id: Optional[str] = None, order_id: Optional[str] = None):
@@ -249,7 +264,7 @@ async def start_handler(message: Message, state: FSMContext):
     await message.answer(welcome_text, reply_markup=get_info_flag_keyboard())
 
 # --- TYPE SELECTION (Shows Command Guide) ---
-@router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
+
 @router.callback_query(PurchaseState.waiting_for_command, F.data == "back_to_type") 
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type")
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
@@ -465,7 +480,7 @@ async def choose_type(callback: CallbackQuery, state: FSMContext):
     if chosen == "__RANDOM__":
         # Random across ALL types; if you want random within a chosen type,
         # you can present a second step or remember the last type selection.
-        random_header = await pick_random_header(has_extra_info, selected_type_you_want)
+random_header = await pick_random_header(has_extra_info, None)
         if not random_header:
             await callback.answer("No stock available for a random pick.", show_alert=True)
             return
@@ -550,8 +565,8 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         increase_by = max(needed_qty - quantity, 0)
 
         # Check if the BIN can even reach the minimum given current stock
-       data = await state.get_data()
-selected_type = data.get("selected_type")  # may be None
+    data_for_recheck = await state.get_data()
+selected_type = data_for_recheck.get("selected_type")
 available_stock = await check_stock_count_filtered(bin_header, is_full_info, selected_type)
 
         if needed_qty > available_stock:
@@ -840,7 +855,8 @@ async def increase_qty_callback(callback: CallbackQuery, state: FSMContext):
         requested_qty = int(data.get("quantity", 1)) + inc
 
         # re-check live stock for this BIN
-        available_stock = await check_stock_count(bin_header, is_full_info)
+  selected_type = data.get("selected_type")
+available_stock = await check_stock_count_filtered(bin_header, is_full_info, selected_type)
 
         if requested_qty > available_stock:
             # Build a helpful message + choices
