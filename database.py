@@ -48,9 +48,7 @@ async def get_pool() -> asyncpg.Pool:
     return _pool
 
 async def get_raw_connection_params(url: str) -> dict:
-    """Parses the Render DATABASE_URL into individual components."""
     parsed = urlparse(url)
-    
     return {
         'user': parsed.username,
         'password': parsed.password,
@@ -101,7 +99,7 @@ CREATE TABLE giftCard_inventory (
 
 
 # replace your current add_key with this
-sync def add_key(
+async def add_key(
     key_detail: str,
     key_header: str,
     is_full_info: bool,
@@ -186,30 +184,30 @@ async def get_key_and_mark_sold(key_header: str, is_full_info: bool, quantity: i
     pool = await get_pool()
     
     async with pool.acquire() as conn:
-        async with conn.transaction():
-            # 1. Select the IDs and details of the required keys
-            key_records = await conn.fetch("""
-                SELECT id, key_detail
-                FROM giftCard_inventory
-                WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
-                LIMIT $3
-                FOR UPDATE
-            """, key_header, is_full_info, quantity)
-            
-            if len(key_records) < quantity:
-                return [] # Stock disappeared between check and fulfillment
+       async with conn.transaction():
+    rows = await conn.fetch("""
+        SELECT id
+        FROM giftCard_inventory
+        WHERE key_header = $1 AND is_full_info = $2 AND sold = FALSE
+        ORDER BY id
+        FOR UPDATE SKIP LOCKED
+        LIMIT $3
+    """, key_header, is_full_info, quantity)
 
-            key_ids = [record['id'] for record in key_records]
-            key_details = [record['key_detail'] for record in key_records]
+    if len(rows) < quantity:
+        return []
 
-            # 2. Mark the selected keys as sold
-            await conn.executemany("""
-                UPDATE giftCard_inventory
-                SET sold = TRUE
-                WHERE id = $1
-            """, [(id,) for id in key_ids])
-            
-            return key_details
+    ids = [r["id"] for r in rows]
+
+    # Single UPDATE with RETURNING to get the details in one round-trip
+    updated = await conn.fetch("""
+        UPDATE giftCard_inventory
+        SET sold = TRUE
+        WHERE id = ANY($1::int[])
+        RETURNING key_detail
+    """, ids)
+
+    return [u["key_detail"] for u in updated]
 
 async def get_order_from_db(order_id: str):
     """Fetch an order by order_id (used in fulfill_order)."""
