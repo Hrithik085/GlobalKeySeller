@@ -629,104 +629,124 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         await state.clear()
         return
 
-    # --- Enforce MINIMUM_USD ---
-   # --- Enforce MINIMUM_USD & validate stock ---
-   if mode == "random":
-       prices = None
-       if total_price <= 0:
-           prices = await quote_random_prices(True, quantity, chosen_type)
-           if len(prices) < quantity:
-               back_cb = "fi_back_types" if chosen_type else "back_to_type"
-               await callback.message.edit_text(
-                   "⚠️ Stock changed. Not enough random Full Info available for that quantity.",
-                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=back_cb)]]),
-                   parse_mode="Markdown",
-               )
-               await callback.answer()
-               return
-           total_price = float(sum(prices))
-           await state.update_data(price=total_price)
+    # --- Enforce MINIMUM_USD & validate stock ---
+    if mode == "random":
+        prices = None
+        if total_price <= 0:
+            prices = await quote_random_prices(True, quantity, chosen_type)
+            if len(prices) < quantity:
+                back_cb = "fi_back_types" if chosen_type else "back_to_type"
+                await callback.message.edit_text(
+                    "⚠️ Stock changed. Not enough random Full Info available for that quantity.",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=back_cb)]]),
+                    parse_mode="Markdown",
+                )
+                await callback.answer()
+                return
+            total_price = float(sum(prices))
+            await state.update_data(price=total_price)
 
-       if prices is None:
-           prices = await quote_random_prices(True, quantity, chosen_type)
-           if len(prices) < quantity:
-               back_cb = "fi_back_types" if chosen_type else "back_to_type"
-               await callback.message.edit_text(
-                   "⚠️ Stock changed. Not enough random Full Info available for that quantity.",
-                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=back_cb)]]),
-                   parse_mode="Markdown",
-               )
-               await callback.answer()
-               return
+        if prices is None:
+            prices = await quote_random_prices(True, quantity, chosen_type)
+            if len(prices) < quantity:
+                back_cb = "fi_back_types" if chosen_type else "back_to_type"
+                await callback.message.edit_text(
+                    "⚠️ Stock changed. Not enough random Full Info available for that quantity.",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=back_cb)]]),
+                    parse_mode="Markdown",
+                )
+                await callback.answer()
+                return
 
-       if total_price < MINIMUM_USD:
-           back_cb = "fi_back_types" if chosen_type else "back_to_type"
-           await callback.message.edit_text(
-               f"⚠️ *Minimum payment required*\n\n"
-               f"Provider minimum: *${MINIMUM_USD:.2f}*.\n"
-               f"Your total (sum of selected item prices): *${total_price:.2f}*.\n\n"
-               "Please increase quantity or go back and choose another option.",
-               parse_mode="Markdown",
-               reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=back_cb)]]),
-           )
-           await callback.answer()
-           return
+        if total_price < MINIMUM_USD:
+            back_cb = "fi_back_types" if chosen_type else "back_to_type"
+            await callback.message.edit_text(
+                f"⚠️ *Minimum payment required*\n\n"
+                f"Provider minimum: *${MINIMUM_USD:.2f}*.\n"
+                f"Your total (sum of selected item prices): *${total_price:.2f}*.\n\n"
+                "Please increase quantity or go back and choose another option.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=back_cb)]]),
+            )
+            await callback.answer()
+            return
 
-   else:
-       unit_price = data.get("unit_price")
-       if unit_price is None:
-           unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
-       try:
-           unit_price = float(unit_price)
-       except Exception:
-           unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
+    else:
+        # Stock check for non-random (BIN/header) flow
+        available_stock = await check_stock_count(code_header, is_full_info)
+        if quantity > available_stock:
+            msg = (
+                f"⚠️ Stock changed for code `{code_header}`.\n"
+                f"Available now: *{available_stock}* | Requested: *{quantity}*.\n\n"
+                "Choose an option:"
+            )
+            kb_rows = []
+            if available_stock > 0:
+                kb_rows.append([InlineKeyboardButton(text=f"Use {available_stock}", callback_data=f"set_qty:{available_stock}")])
+            kb_rows.append([InlineKeyboardButton(text="Choose another code", callback_data="back_to_type")])
+            kb_rows.append([InlineKeyboardButton(text="Cancel order", callback_data="cancel_invoice")])
 
-       if total_price < MINIMUM_USD:
-           import math
-           needed_qty = max(1, int(math.ceil(MINIMUM_USD / unit_price)))
-           increase_by = max(needed_qty - quantity, 0)
-           available_stock = await check_stock_count(code_header, is_full_info)
+            await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows), parse_mode="Markdown")
+            await callback.answer()
+            return
 
-           if needed_qty > available_stock:
-               msg = (
-                   f"⚠️ *Minimum payment required*\n\n"
-                   f"Provider minimum: *${MINIMUM_USD:.2f}*.\n"
-                   f"Your total: *${total_price:.2f}* for *{quantity}* "
-                   f"{'Key' if quantity == 1 else 'Keys'} (unit: ${unit_price:.2f}).\n\n"
-                   f"code `{code_header}` has only *{available_stock}* in stock, "
-                   f"but you would need *{needed_qty}* to meet the minimum.\n\n"
-                   "Choose an option:"
-               )
-               rows = []
-               if available_stock > 0:
-                   rows.append([InlineKeyboardButton(text=f"Use {available_stock} (max for this code)", callback_data=f"set_qty:{available_stock}")])
-               rows.append([InlineKeyboardButton(text="Choose another code", callback_data="back_to_type")])
-               rows.append([InlineKeyboardButton(text="Cancel order", callback_data="cancel_invoice")])
+        unit_price = data.get("unit_price")
+        if unit_price is None:
+            unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
+        try:
+            unit_price = float(unit_price)
+        except Exception:
+            unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
 
-               await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
-               await callback.answer()
-               return
+        if total_price < MINIMUM_USD:
+            import math
+            needed_qty = max(1, int(math.ceil(MINIMUM_USD / unit_price)))
+            increase_by = max(needed_qty - quantity, 0)
+            available_stock = await check_stock_count(code_header, is_full_info)
 
-           msg = (
-               f"⚠️ *Minimum payment required*\n\n"
-               f"Provider minimum: *${MINIMUM_USD:.2f}*.\n"
-               f"Your total: *${total_price:.2f}* for *{quantity}* "
-               f"{'Key' if quantity == 1 else 'Keys'} (unit: ${unit_price:.2f}).\n\n"
-               f"To reach the minimum you need at least *{needed_qty}* "
-               f"{'Key' if needed_qty == 1 else 'Keys'} (increase by {increase_by}).\n\n"
-               "Choose an action:"
-           )
-           rows = []
-           if increase_by > 0:
-               rows.append([InlineKeyboardButton(text=f"➕ Increase to {needed_qty} (meets ${MINIMUM_USD:.0f})", callback_data=f"increase_qty:{increase_by}")])
-           rows.append([InlineKeyboardButton(text="➕ Increase quantity by 1", callback_data="increase_qty:1")])
-           rows.append([InlineKeyboardButton(text="❌ Cancel order", callback_data="cancel_invoice")])
+            if needed_qty > available_stock:
+                msg = (
+                    f"⚠️ *Minimum payment required*\n\n"
+                    f"Provider minimum: *${MINIMUM_USD:.2f}*.\n"
+                    f"Your total: *${total_price:.2f}* for *{quantity}* "
+                    f"{'Key' if quantity == 1 else 'Keys'} (unit: ${unit_price:.2f}).\n\n"
+                    f"code `{code_header}` has only *{available_stock}* in stock, "
+                    f"but you would need *{needed_qty}* to meet the minimum.\n\n"
+                    "Choose an option:"
+                )
+                rows = []
+                if available_stock > 0:
+                    rows.append([InlineKeyboardButton(text=f"Use {available_stock} (max for this code)", callback_data=f"set_qty:{available_stock}")])
+                rows.append([InlineKeyboardButton(text="Choose another code", callback_data="back_to_type")])
+                rows.append([InlineKeyboardButton(text="Cancel order", callback_data="cancel_invoice")])
 
-           await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
-           await callback.answer()
-           return
+                await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
+                await callback.answer()
+                return
+
+            msg = (
+                f"⚠️ *Minimum payment required*\n\n"
+                f"Provider minimum: *${MINIMUM_USD:.2f}*.\n"
+                f"Your total: *${total_price:.2f}* for *{quantity}* "
+                f"{'Key' if quantity == 1 else 'Keys'} (unit: ${unit_price:.2f}).\n\n"
+                f"To reach the minimum you need at least *{needed_qty}* "
+                f"{'Key' if needed_qty == 1 else 'Keys'} (increase by {increase_by}).\n\n"
+                "Choose an action:"
+            )
+            rows = []
+            if increase_by > 0:
+                rows.append([InlineKeyboardButton(text=f"➕ Increase to {needed_qty} (meets ${MINIMUM_USD:.0f})", callback_data=f"increase_qty:{increase_by}")])
+            rows.append([InlineKeyboardButton(text="➕ Increase quantity by 1", callback_data="increase_qty:1")])
+            rows.append([InlineKeyboardButton(text="❌ Cancel order", callback_data="cancel_invoice")])
+
+            await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
+            await callback.answer()
+            return
 
     # --- Create the invoice with retries ---
+    # ... (rest of the function remains the same)
+
+    # ... (Existing code for Create the invoice with retries block) ...
     loop = asyncio.get_event_loop()
 
     def extract_payment_url(resp: dict) -> Optional[str]:
