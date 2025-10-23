@@ -243,7 +243,14 @@ async def start_handler(message: Message, state: FSMContext):
     )
     await message.answer(welcome_text, reply_markup=get_key_type_keyboard())
 
-# --- TYPE SELECTION (Shows Command Guide) ---
+
+def get_confirmation_keyboard(code_header: str, quantity: int) -> InlineKeyboardMarkup:
+    # For BIN/header flow we use a simple "confirm" callback
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Confirm & Invoice", callback_data="confirm")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_type")]
+    ])
+
 @router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
 @router.callback_query(PurchaseState.waiting_for_command, F.data == "back_to_type")
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type")
@@ -253,7 +260,7 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    is_full_info = callback.data.split(":")[1] == "1"
+    is_full_info = (callback.data.split(":")[1] == "1")
     await state.update_data(is_full_info=is_full_info)
 
     if is_full_info:
@@ -282,46 +289,12 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         )
         await callback.answer()
         return
-    else:
-        # Info-less: show command guide (your existing flow)
-        await state.set_state(PurchaseState.waiting_for_command)
-        key_type_label = "Info-less"
-        try:
-            codes_with_count = await fetch_codes_with_count(False)
-            available_codes_formatted = [f"{code_header} ({count} left)" for code_header, count in codes_with_count]
-        except Exception:
-            available_codes_formatted = ["DB ERROR"]
-            logger.exception("Failed to fetch available codes during menu load.")
 
-        command_guide = (
-            f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
-            f"📝 To place an order, send a command in the following format:\n"
-            f"**Copy/Send this:**\n"
-            f"```\nget_giftCard_by_header:<code> <Quantity>\n```\n"
-            f"✨ Example for buying 10 Keys:\n"
-            f"**`get_giftCard_by_header:456456 10`**\n\n"
-            f"Available codes in stock: {', '.join(available_codes_formatted) if available_codes_formatted else 'None'}"
-        )
-
-        await callback.message.edit_text(
-            command_guide,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Back to Type Selection", callback_data="back_to_type")]
-            ])
-        )
-        await callback.answer()
-
-
-
-    is_full_info_str = callback.data.split(":")[1]
-    is_full_info = (is_full_info_str == '1')
-    await state.update_data(is_full_info=is_full_info)
-  await state.set_state(PurchaseState.waiting_for_command)
-
-    key_type_label = "Full Info" if is_full_info else "Info-less"
-    
+    # info-less flow
+    await state.set_state(PurchaseState.waiting_for_command)
+    key_type_label = "Info-less"
     try:
-        codes_with_count = await fetch_codes_with_count(is_full_info)
+        codes_with_count = await fetch_codes_with_count(False)
         available_codes_formatted = [f"{code_header} ({count} left)" for code_header, count in codes_with_count]
     except Exception:
         available_codes_formatted = ["DB ERROR"]
