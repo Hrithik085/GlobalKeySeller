@@ -1341,8 +1341,70 @@ async def nowpayments_debug(request: Request):
 
     return Response(status_code=200)
 
+@app.post("/ingest-masked-lines")
+async def ingest_masked_lines(
+    # --- NEW REQUIRED BODY PARAMETERS ---
+    key_type: str = Body(..., description="The type category for these keys (e.g., 'Visa', 'Mastercard', 'CA', 'BC')"),
+    unit_price: float = Body(..., ge=0.01, description="The price for each key in this batch"),
+    # ------------------------------------
+    file: UploadFile | None = File(default=None, description="Text file with pipe-delimited masked/hashed rows"),
+    body_text: str | None = Body(default=None, media_type="text/plain", description="Raw text with rows separated by newlines"),
+):
+    """
+    Each row is validated to reject 13–19 digit sequences.
+    Extracts a 6-digit prefix from the first or second field,
+    classifies row as 'full' vs 'non-full' info, and stores via add_key() with type and price.
+    """
+    if not file and not body_text:
+        raise HTTPException(status_code=400, detail="Provide a text file or plain-text body.")
 
+    try:
+        lines = await _iter_lines_from_upload(file) if file else await _iter_lines_from_body(body_text)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not read input. Provide UTF-8 text.")
 
+    if not lines:
+        raise HTTPException(status_code=400, detail="No rows found.")
+
+    # Process rows
+    accepted, rejected = 0, 0
+    problems: list[dict] = []
+
+    for idx, line in enumerate(lines, start=1):
+        fields = line.split("|")
+
+        # Extract 6-digit prefix (code-like prefix). If missing, reject.
+        prefix6 = extract_prefix6(fields)
+        if not prefix6:
+            rejected += 1
+            problems.append({"line": idx, "reason": "no 6-digit prefix found in first two fields"})
+            continue
+
+        # Heuristic full-info classification
+        full_info = is_full_info_row(fields)
+
+        # Persist (re-using your existing DB helper)
+        try:
+            # --- FIX: Pass new arguments (key_type, price) to the DB helper ---
+            await add_key(
+                key_detail=line,
+                key_header=prefix6,
+                is_full_info=full_info,
+                key_type=key_type,
+                price=unit_price
+            )
+            accepted += 1
+        except Exception as e:
+            rejected += 1
+            problems.append({"line": idx, "reason": f"db error: {type(e).__name__}"})
+
+    return {
+        "status": "ok",
+        "accepted": accepted,
+        "rejected": rejected,
+        "problems": problems[:100],  # cap to keep response small
+        "note": "Only masked/hashed rows are accepted. Rows resembling clear PANs are rejected.",
+    }
 
 @app.get("/")
 def health_check():

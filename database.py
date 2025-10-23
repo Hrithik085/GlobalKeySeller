@@ -99,13 +99,25 @@ async def initialize_db():
 
 
 
-async def add_key(key_detail: str, key_header: str, is_full_info: bool):
-    """Add a single key to the card_inventory table."""
+# --- Update in database.py ---
+
+async def add_key(
+    key_detail: str,
+    key_header: str,
+    is_full_info: bool,
+    # Add new parameters with defaults for backwards compatibility if needed
+    key_type: str = 'unknown',
+    price: float = 5.00
+):
+    """Add a single key to the card_inventory table, including type and price."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO card_inventory (key_detail, key_header, is_full_info) VALUES ($1, $2, $3)",
-            key_detail, key_header, is_full_info
+            """
+            INSERT INTO card_inventory (key_detail, key_header, is_full_info, type, price)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            key_detail, key_header, is_full_info, key_type, price # $4 is type, $5 is price
         )
 
 async def check_stock_count(key_header: str, is_full_info: bool) -> int:
@@ -384,7 +396,7 @@ async def print_inventory_summary():
 async def main_setup():
     print("Initializing and populating DB...")
     await initialize_db()
-    await populate_initial_keys()
+#     await populate_initial_keys()
 
     global _pool
     if _pool:
