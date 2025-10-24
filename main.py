@@ -316,33 +316,36 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    # info-less flow
-   else:
-           try:
-               # Use fetch_types_with_count with False for info-less keys
-               types_with_count = await fetch_types_with_count(False)
-           except Exception:
-               types_with_count = []
-               logger.exception("Failed to load types for Info-less menu.")
+    # info-less flow (Corrected alignment starts here)
+    else:
+        try:
+            # Use fetch_types_with_count with False for info-less keys
+            types_with_count = await fetch_types_with_count(False)
+        except Exception:
+            types_with_count = []
+            logger.exception("Failed to load types for Info-less menu.")
 
-           if not types_with_count:
-               await callback.message.edit_text(
-                   "No Info-less stock available right now.",
-                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                       [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_type")]
-                   ])
-               )
-               await callback.answer()
-               return
+        if not types_with_count:
+            await callback.message.edit_text(
+                "No Info-less stock available right now.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_type")]
+                ])
+            )
+            await callback.answer()
+            return
 
-           # Transition to the new Info-less type selection state
-           await state.set_state(PurchaseState.waiting_for_il_type)
-           await callback.message.edit_text(
-               "Select a **type** for Info-less Keys:",
-               reply_markup=get_infoless_type_keyboard(types_with_count),
-               parse_mode="Markdown"
-           )
-           await callback.answer()
+        # Transition to the new Info-less type selection state
+        await state.set_state(PurchaseState.waiting_for_il_type)
+        await callback.message.edit_text(
+            "Select a **type** for Info-less Keys:",
+            reply_markup=get_infoless_type_keyboard(types_with_count),
+            parse_mode="Markdown"
+        )
+        await callback.answer()
+
+
+
 
 @router.callback_query(PurchaseState.waiting_for_fi_type, F.data.startswith("fi_type:"))
 async def handle_fi_type(callback: CallbackQuery, state: FSMContext):
