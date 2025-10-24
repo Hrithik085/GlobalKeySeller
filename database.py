@@ -63,50 +63,51 @@ async def initialize_db():
     pool = await get_pool()
     async with pool.acquire() as conn:
 
-        # --- Create card_inventory table IF NOT EXISTS ---
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS card_inventory (
-                id SERIAL PRIMARY KEY,
-                key_detail TEXT NOT NULL,
-                key_header TEXT NOT NULL,
-                is_full_info BOOLEAN NOT NULL,
-                sold BOOLEAN NOT NULL DEFAULT FALSE,
-                type TEXT NOT NULL DEFAULT 'unknown',
-                price NUMERIC(10,2) NOT NULL DEFAULT 5.00
-            )
-        """)
-        print("PostgreSQL Database table 'card_inventory' ensured to exist.")
+      # --- Create card_inventory table IF NOT EXISTS ---
+              await conn.execute("""
+                  CREATE TABLE IF NOT EXISTS card_inventory (
+                      id SERIAL PRIMARY KEY,
+                      key_detail TEXT NOT NULL,
+                      key_header TEXT NOT NULL,
+                      is_full_info BOOLEAN NOT NULL,
+                      sold BOOLEAN NOT NULL DEFAULT FALSE,
+                      type TEXT NOT NULL DEFAULT 'unknown',
+                      price NUMERIC(10,2) NOT NULL DEFAULT 5.00
+                  )
+              """)
+              print("PostgreSQL Database table 'card_inventory' ensured to exist.")
 
-        # --- Create orders table IF NOT EXISTS ---
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                order_id TEXT PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                key_header TEXT NOT NULL,
-                quantity INT NOT NULL,
-                is_full_info BOOLEAN NOT NULL,
-                type TEXT NOT NULL DEFAULT 'unknown',
-                fulfilled BOOLEAN NOT NULL DEFAULT FALSE,
-                status TEXT DEFAULT 'pending'
-            )
-        """)
-        print("PostgreSQL Database table 'orders' ensured to exist.")
+              # --- Create orders table IF NOT EXISTS ---
+              await conn.execute("""
+                  CREATE TABLE IF NOT EXISTS orders (
+                      order_id TEXT PRIMARY KEY,
+                      user_id BIGINT NOT NULL,
+                      key_header TEXT NOT NULL,
+                      quantity INT NOT NULL,
+                      is_full_info BOOLEAN NOT NULL,
+                      type TEXT NOT NULL DEFAULT 'unknown',
+                      fulfilled BOOLEAN NOT NULL DEFAULT FALSE,
+                      status TEXT DEFAULT 'pending'
+                  )
+              """)
+              print("PostgreSQL Database table 'orders' ensured to exist.")
 
-                await conn.execute("""
-                                    CREATE TABLE IF NOT EXISTS price_rules (
-                                        rule_id SERIAL PRIMARY KEY,
-                                        key_type TEXT NOT NULL UNIQUE,
-                                        purchase_mode TEXT NOT NULL DEFAULT 'BY_BIN',
-                                        fixed_price NUMERIC(10,2) NOT NULL,
-                                        is_active BOOLEAN NOT NULL DEFAULT TRUE
-                                    );
+              # --- Create price_rules table IF NOT EXISTS (FIXED INDENTATION) ---
+              await conn.execute("""
+                  CREATE TABLE IF NOT EXISTS price_rules (
+                      rule_id SERIAL PRIMARY KEY,
+                      key_type TEXT NOT NULL UNIQUE,
+                      purchase_mode TEXT NOT NULL DEFAULT 'BY_BIN',
+                      fixed_price NUMERIC(10,2) NOT NULL,
+                      is_active BOOLEAN NOT NULL DEFAULT TRUE
+                  );
 
-                                    -- Insert the specific rule requested (USA type, BY_BIN mode, $17.00 price)
-                                    INSERT INTO price_rules (key_type, fixed_price)
-                                    VALUES ('USA', 17.00)
-                                    ON CONFLICT (key_type) DO UPDATE SET fixed_price = 17.00;
-                                """)
-                print("PostgreSQL Database table 'price_rules' ensured to exist.")
+                  -- Insert the specific rule requested (USA type, BY_BIN mode, $17.00 price)
+                  INSERT INTO price_rules (key_type, fixed_price)
+                  VALUES ('USA', 17.00)
+                  ON CONFLICT (key_type) DO UPDATE SET fixed_price = 17.00;
+              """)
+              print("PostgreSQL Database table 'price_rules' and initial rules ensured to exist.")
 
 # --- Update in database.py ---
 async def get_price_rule_by_type(key_type: str, purchase_mode: str = 'BY_BIN') -> Optional[float]:
