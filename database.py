@@ -93,20 +93,20 @@ async def initialize_db():
         print("PostgreSQL Database table 'orders' ensured to exist.")
 
                 await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS price_rules (
-                        rule_id SERIAL PRIMARY KEY,
-                        key_type TEXT NOT NULL UNIQUE,
-                        purchase_mode TEXT NOT NULL DEFAULT 'BY_BIN',
-                        fixed_price NUMERIC(10,2) NOT NULL,
-                        is_active BOOLEAN NOT NULL DEFAULT TRUE
-                    );
+                                    CREATE TABLE IF NOT EXISTS price_rules (
+                                        rule_id SERIAL PRIMARY KEY,
+                                        key_type TEXT NOT NULL UNIQUE,
+                                        purchase_mode TEXT NOT NULL DEFAULT 'BY_BIN',
+                                        fixed_price NUMERIC(10,2) NOT NULL,
+                                        is_active BOOLEAN NOT NULL DEFAULT TRUE
+                                    );
 
-                    -- Insert the specific rule requested (USA type, BY_BIN mode, $17.00 price)
-                    INSERT INTO price_rules (key_type, fixed_price)
-                    VALUES ('USA', 17.00)
-                    ON CONFLICT (key_type) DO UPDATE SET fixed_price = 17.00;
-                """)
-                print("PostgreSQL Database table 'orders' ensured to exist.")
+                                    -- Insert the specific rule requested (USA type, BY_BIN mode, $17.00 price)
+                                    INSERT INTO price_rules (key_type, fixed_price)
+                                    VALUES ('USA', 17.00)
+                                    ON CONFLICT (key_type) DO UPDATE SET fixed_price = 17.00;
+                                """)
+                print("PostgreSQL Database table 'price_rules' ensured to exist.")
 
 # --- Update in database.py ---
 async def get_price_rule_by_type(key_type: str, purchase_mode: str = 'BY_BIN') -> Optional[float]:
