@@ -565,24 +565,40 @@ async def handle_il_bin_choice(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+# You must ensure get_price_rule_by_type is imported from database.py at the top
 @router.message(PurchaseState.waiting_for_il_bin_qty, F.text.regexp(r"^\d{1,4}$"))
 async def handle_il_bin_qty(message: Message, state: FSMContext):
-    """Uses the same logic as handle_bin_qty but with is_full_info=False and new state."""
+    """Handles quantity input for a fixed Info-less BIN/Header."""
     qty = int(message.text)
     data = await state.get_data()
     key_header = data["code"]
     is_full_info = False # Info-less flow
+    card_type = data.get("selected_type") # Type is needed for the override check
 
     available = await check_stock_count(key_header, is_full_info)
-    if qty > available:
-        await message.answer(f"Only {available} available for `{key_header}`.")
+    if qty <= 0 or qty > available:
+        await message.answer(f"⚠️ Invalid quantity. Available for `{key_header}`: {available}.")
         return
 
-    # 🔑 Get dynamic unit price from DB, fallback to config
-    unit_price = await get_price_by_header(key_header, is_full_info)
-    if unit_price is None:
-        unit_price = KEY_PRICE_INFOLESS
-        logger.warning(f"Using fallback config price for Info-less header {key_header}.")
+    # --- PRICE LOGIC MODIFICATION START ---
+
+    # 1. Check database for fixed price rule (e.g., USA=$17.00 BY_BIN rule)
+    override_price = await get_price_rule_by_type(card_type, purchase_mode='BY_BIN')
+
+    if override_price is not None:
+        unit_price = override_price
+        logger.info(f"Using fixed price of ${unit_price:.2f} fetched from price_rules table (Info-less).")
+    else:
+        # 2. If no rule found, fetch dynamic price from DB (or fallback)
+        unit_price = await get_price_by_header(key_header, is_full_info)
+        if unit_price is None:
+            unit_price = KEY_PRICE_INFOLESS
+            logger.warning(f"Using fallback config price for Info-less header {key_header}.")
+
+    # Ensure unit_price is a float for calculation
+    unit_price = float(unit_price)
+
+    # --- PRICE LOGIC MODIFICATION END ---
 
     total_price = qty * unit_price
 
@@ -596,7 +612,6 @@ async def handle_il_bin_qty(message: Message, state: FSMContext):
     )
     await state.set_state(PurchaseState.waiting_for_confirmation)
 
-    # ... (build confirmation message and keyboard) ...
     confirmation_message = (
         f"🛒 **BIN Order Confirmation**\n"
         f"BIN: `{key_header}`\n"
@@ -834,25 +849,39 @@ async def handle_bin_choice(callback: CallbackQuery, state: FSMContext):
         ])
     )
     await callback.answer()
-
 @router.message(PurchaseState.waiting_for_bin_qty, F.text.regexp(r"^\d{1,4}$"))
 async def handle_bin_qty(message: Message, state: FSMContext):
     qty = int(message.text)
     data = await state.get_data()
     key_header = data["code"]
     is_full_info = True
+    card_type = data.get("selected_type") # Type is needed for the override check
+
     # check stock
     available = await check_stock_count(key_header, is_full_info)
     if qty > available:
         await message.answer(f"Only {available} available for `{key_header}`.")
         return
 
-    # 🔑 FIX: Get dynamic unit price from DB, fallback to config if DB fails or is None
-    unit_price = await get_price_by_header(key_header, is_full_info)
-    if unit_price is None:
-        # Fallback for Full Info keys
-        unit_price = KEY_PRICE_FULL
-        logger.warning(f"Using fallback config price for BIN {key_header}.")
+    # --- PRICE LOGIC MODIFICATION START ---
+
+    # 1. Check database for fixed price rule (e.g., USA=$17.00 BY_BIN rule)
+    override_price = await get_price_rule_by_type(card_type, purchase_mode='BY_BIN')
+
+    if override_price is not None:
+        unit_price = override_price
+        logger.info(f"Using fixed price of ${unit_price:.2f} fetched from price_rules table (Full Info).")
+    else:
+        # 2. If no rule found, fetch dynamic price from DB (or fallback)
+        unit_price = await get_price_by_header(key_header, is_full_info)
+        if unit_price is None:
+            unit_price = KEY_PRICE_FULL
+            logger.warning(f"Using fallback config price for BIN {key_header}.")
+
+    # Ensure unit_price is a float for calculation
+    unit_price = float(unit_price)
+
+    # --- PRICE LOGIC MODIFICATION END ---
 
     total_price = qty * unit_price
 
