@@ -84,18 +84,20 @@ FULL_IPN_URL = f"{BASE_WEBHOOK_URL}{PAYMENT_WEBHOOK_PATH}"
 
 
 # --- 2. FSM States and Keyboards ---
+# --- 2. FSM States and Keyboards ---
 class PurchaseState(StatesGroup):
     waiting_for_type = State()
     waiting_for_command = State()
     waiting_for_confirmation = State()
     waiting_for_payment = State()
-    # NEW
+    # NEW FOR FULL INFO
     waiting_for_fi_type = State()
     waiting_for_random_qty = State()
     waiting_for_bin_qty = State()
+    # NEW FOR INFO-LESS (IL)
     waiting_for_il_type = State()
-        waiting_for_il_random_qty = State()
-        waiting_for_il_bin_qty = State()
+    waiting_for_il_random_qty = State()
+    waiting_for_il_bin_qty = State()
 
 def get_key_type_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -683,6 +685,7 @@ async def handle_il_random_qty(message: Message, state: FSMContext):
 async def prompt_il_command_entry(callback: CallbackQuery, state: FSMContext):
     """Presents the original command prompt for Info-less keys."""
     await state.set_state(PurchaseState.waiting_for_command)
+    await state.update_data(is_full_info=False)
     key_type_label = "Info-less"
     try:
         # NOTE: is_full_info=False
