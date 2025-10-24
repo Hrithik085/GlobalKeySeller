@@ -35,7 +35,8 @@ from database import (
     fetch_codes_with_count, get_key_and_mark_sold, get_order_from_db, save_order, update_order_status, add_key,
     # NEW:
     fetch_types_with_count, fetch_bins_by_type_with_count, quote_random_prices, get_random_keys_and_mark_sold,
-    mark_order_fulfilled, get_price_by_header,  # you’re already calling this in fulfill
+    mark_order_fulfilled, get_price_by_header,
+    get_price_rule_by_type, # <--- NEWLY ADDED IMPORT
 )
 try:
     from config import KEY_PRICE_INFOLESS, KEY_PRICE_FULL
