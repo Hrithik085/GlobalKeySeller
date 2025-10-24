@@ -258,8 +258,8 @@ async def start_handler(message: Message, state: FSMContext):
     welcome_text = (
         "🌟 **Welcome to Rockers GiftgiftCard Shop!** 💳\n\n"
         "We offer high-quality Keys:\n"
-        "  • Info-less Keys\n"
-        "  • Full Info Keys\n\n"
+        "  • Full Info CVV\n"
+        "  • Full Info CVV\n\n"
         "💎 **Features:**\n"
         "  • 24/7 Service\n"
         "  • Instant Delivery\n"
