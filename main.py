@@ -93,6 +93,10 @@ class PurchaseState(StatesGroup):
     waiting_for_fi_type = State()
     waiting_for_random_qty = State()
     waiting_for_bin_qty = State()
+    waiting_for_il_type = State()
+        waiting_for_il_random_qty = State()
+        waiting_for_il_bin_qty = State()
+
 def get_key_type_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Full Info Keys", callback_data="type_select:1")],
@@ -105,6 +109,26 @@ def get_fullinfo_type_keyboard(types_with_count: List[Tuple[str,int]]) -> Inline
     rows.append([InlineKeyboardButton(text="🎲 Random (any type)", callback_data="fi_random:any")])
     rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_type")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+# Re-use fetch_types_with_count and fetch_bins_by_type_with_count from database.py
+
+def get_infoless_type_keyboard(types_with_count: List[Tuple[str,int]]) -> InlineKeyboardMarkup:
+    # Use 'il_type' prefix for Info-less types
+    rows = [[InlineKeyboardButton(text=f"{t} ({c})", callback_data=f"il_type:{t}")]
+            for t, c in types_with_count[:20]]
+    rows.append([InlineKeyboardButton(text="🎲 Random (any type)", callback_data="il_random:any")])
+    rows.append([InlineKeyboardButton(text="⌨️ Command Entry", callback_data="il_command:prompt")]) # New option
+    rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_type")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def get_il_bins_for_type_keyboard(card_type: str, bins_with_count: List[Tuple[str,int]]) -> InlineKeyboardMarkup:
+    # Use 'il_bin' and 'il_random' prefix for Info-less BINs
+    rows = [[InlineKeyboardButton(text=f"{hdr} ({cnt})", callback_data=f"il_bin:{card_type}:{hdr}")]
+            for hdr, cnt in bins_with_count[:20]]
+    rows.append([InlineKeyboardButton(text=f"🎲 Random ({card_type})", callback_data=f"il_random:{card_type}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Back to Types", callback_data="il_back_types")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def get_bins_for_type_keyboard(card_type: str, bins_with_count: List[Tuple[str,int]]) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=f"{hdr} ({cnt})", callback_data=f"fi_bin:{card_type}:{hdr}")]
@@ -291,32 +315,32 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         return
 
     # info-less flow
-    await state.set_state(PurchaseState.waiting_for_command)
-    key_type_label = "Info-less"
-    try:
-        codes_with_count = await fetch_codes_with_count(False)
-        available_codes_formatted = [f"{code_header} ({count} left)" for code_header, count in codes_with_count]
-    except Exception:
-        available_codes_formatted = ["DB ERROR"]
-        logger.exception("Failed to fetch available codes during menu load.")
+   else:
+           try:
+               # Use fetch_types_with_count with False for info-less keys
+               types_with_count = await fetch_types_with_count(False)
+           except Exception:
+               types_with_count = []
+               logger.exception("Failed to load types for Info-less menu.")
 
-    command_guide = (
-        f"🔐 **{key_type_label} CVV Purchase Guide**\n\n"
-        f"📝 To place an order, send a command in the following format:\n"
-        f"**Copy/Send this:**\n"
-        f"```\nget_giftCard_by_header:<code> <Quantity>\n```\n"
-        f"✨ Example for buying 10 Keys:\n"
-        f"**`get_giftCard_by_header:456456 10`**\n\n"
-        f"Available codes in stock: {', '.join(available_codes_formatted) if available_codes_formatted else 'None'}"
-    )
+           if not types_with_count:
+               await callback.message.edit_text(
+                   "No Info-less stock available right now.",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                       [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_type")]
+                   ])
+               )
+               await callback.answer()
+               return
 
-    await callback.message.edit_text(
-        command_guide,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Back to Type Selection", callback_data="back_to_type")]
-        ])
-    )
-    await callback.answer()
+           # Transition to the new Info-less type selection state
+           await state.set_state(PurchaseState.waiting_for_il_type)
+           await callback.message.edit_text(
+               "Select a **type** for Info-less Keys:",
+               reply_markup=get_infoless_type_keyboard(types_with_count),
+               parse_mode="Markdown"
+           )
+           await callback.answer()
 
 @router.callback_query(PurchaseState.waiting_for_fi_type, F.data.startswith("fi_type:"))
 async def handle_fi_type(callback: CallbackQuery, state: FSMContext):
@@ -463,6 +487,228 @@ async def confirm_random_invoice(callback: CallbackQuery, state: FSMContext):
 
     # Go generate the invoice
     await handle_invoice_confirmation(callback, state)
+
+@router.callback_query(PurchaseState.waiting_for_il_type, F.data.startswith("il_type:"))
+async def handle_il_type(callback: CallbackQuery, state: FSMContext):
+    """Handle Info-less type selection (Option 2: Same like type)."""
+    card_type = callback.data.split(":", 1)[1]
+    await state.update_data(selected_type=card_type)
+
+    try:
+        # NOTE: is_full_info=False
+        bins_with_count = await fetch_bins_by_type_with_count(False, card_type)
+    except Exception:
+        bins_with_count = []
+        logger.exception("Failed to fetch BINs for info-less type %s", card_type)
+
+    if not bins_with_count:
+        await callback.message.edit_text(
+            f"No BINs found for Info-less type **{card_type}**.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎲 Random (this type)", callback_data=f"il_random:{card_type}")],
+                [InlineKeyboardButton(text="⬅️ Back to Types", callback_data="il_back_types")]
+            ]),
+            parse_mode="Markdown"
+        )
+    else:
+        # Transition to BIN/Header selection for this type
+        await callback.message.edit_text(
+            f"Type **{card_type}** — choose a BIN/Header or go random:",
+            reply_markup=get_il_bins_for_type_keyboard(card_type, bins_with_count),
+            parse_mode="Markdown"
+        )
+    await callback.answer()
+
+@router.callback_query(PurchaseState.waiting_for_il_type, F.data == "il_back_types")
+@router.callback_query(F.data == "il_back_types")
+async def il_back_to_types(callback: CallbackQuery, state: FSMContext):
+    """Go back to the top-level Info-less type menu."""
+    try:
+        types_with_count = await fetch_types_with_count(False)
+    except Exception:
+        types_with_count = []
+
+    await state.set_state(PurchaseState.waiting_for_il_type)
+    await callback.message.edit_text(
+        "Select a **type** for Info-less Keys:",
+        reply_markup=get_infoless_type_keyboard(types_with_count),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+# --- Option 3: BIN/Header Selection (By key the get by header) ---
+
+@router.callback_query(F.data.startswith("il_bin:"))
+async def handle_il_bin_choice(callback: CallbackQuery, state: FSMContext):
+    _, card_type, key_header = callback.data.split(":", 2)
+    # NOTE: is_full_info=False
+    await state.update_data(is_full_info=False, selected_type=card_type, code=key_header)
+    await state.set_state(PurchaseState.waiting_for_il_bin_qty)
+
+    # Check current unit price and available stock to guide the user
+    available = await check_stock_count(key_header, False)
+    unit_price = await get_price_by_header(key_header, False)
+
+    await callback.message.edit_text(
+        f"BIN **{key_header}** (Type **{card_type}**) selected. "
+        f"Stock: {available}. Price: ${unit_price:.2f}/key.\n"
+        "Enter **quantity** (e.g., `5`).",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Back", callback_data=f"il_type:{card_type}")]
+        ])
+    )
+    await callback.answer()
+
+@router.message(PurchaseState.waiting_for_il_bin_qty, F.text.regexp(r"^\d{1,4}$"))
+async def handle_il_bin_qty(message: Message, state: FSMContext):
+    """Uses the same logic as handle_bin_qty but with is_full_info=False and new state."""
+    qty = int(message.text)
+    data = await state.get_data()
+    key_header = data["code"]
+    is_full_info = False # Info-less flow
+
+    available = await check_stock_count(key_header, is_full_info)
+    if qty > available:
+        await message.answer(f"Only {available} available for `{key_header}`.")
+        return
+
+    # 🔑 Get dynamic unit price from DB, fallback to config
+    unit_price = await get_price_by_header(key_header, is_full_info)
+    if unit_price is None:
+        unit_price = KEY_PRICE_INFOLESS
+        logger.warning(f"Using fallback config price for Info-less header {key_header}.")
+
+    total_price = qty * unit_price
+
+    # Preserve type for the order row
+    await state.update_data(
+        quantity=qty,
+        price=total_price,
+        unit_price=unit_price,
+        user_id=message.from_user.id,
+        is_full_info=False
+    )
+    await state.set_state(PurchaseState.waiting_for_confirmation)
+
+    # ... (build confirmation message and keyboard) ...
+    confirmation_message = (
+        f"🛒 **BIN Order Confirmation**\n"
+        f"BIN: `{key_header}`\n"
+        f"Quantity: {qty}\n"
+        f"Unit: **${unit_price:.2f} {CURRENCY}**\n"
+        f"Total: **${total_price:.2f} {CURRENCY}**\n\n"
+        "Proceed to invoice?"
+    )
+
+    await message.answer(
+        confirmation_message,
+        reply_markup=get_confirmation_keyboard(key_header, qty),
+        parse_mode="Markdown"
+    )
+
+# --- Option 4: Random Selection ---
+
+@router.callback_query(F.data.startswith("il_random:"))
+async def handle_il_random(callback: CallbackQuery, state: FSMContext):
+    """Handle Info-less random selection (Option 4: Random)."""
+    _, type_token = callback.data.split(":", 1)
+    chosen_type = None if type_token == "any" else type_token
+    # NOTE: is_full_info=False
+    await state.update_data(mode="random", random_type=chosen_type, is_full_info=False)
+    await state.set_state(PurchaseState.waiting_for_il_random_qty)
+
+    back_cb = "il_back_types" if chosen_type else "back_to_type"
+
+    await callback.message.edit_text(
+        f"🎲 Random {'Info-less (any type)' if chosen_type is None else f'Info-less ({chosen_type})'} selected.\n"
+        f"Please enter **quantity** (e.g., `5`).",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Back", callback_data=back_cb)]
+        ])
+    )
+    await callback.answer()
+
+@router.message(PurchaseState.waiting_for_il_random_qty, F.text.regexp(r"^\d{1,4}$"))
+async def handle_il_random_qty(message: Message, state: FSMContext):
+    """Uses the same logic as handle_random_qty but with is_full_info=False and new state."""
+    qty = int(message.text)
+    data = await state.get_data()
+    chosen_type = data.get("random_type")  # None means any
+
+    try:
+        # NOTE: is_full_info=False for quote
+        prices = await quote_random_prices(False, qty, chosen_type)
+    except Exception:
+        logger.exception("quote_random_prices failed for info-less")
+        await message.answer("Could not prepare a price quote. Try again.")
+        return
+
+    if len(prices) < qty:
+        await message.answer(
+            f"⚠️ Not enough stock for that quantity. Available: {len(prices)}."
+        )
+        return
+
+    total_price = float(sum(prices))
+    await state.update_data(
+        quantity=qty,
+        price=total_price,
+        unit_price=None,  # variable pricing
+        code="*",         # mark as random in our flow
+        user_id=message.from_user.id,
+        is_full_info=False # Info-less flow
+    )
+
+    await state.set_state(PurchaseState.waiting_for_confirmation) # Moves to confirmation state
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Confirm & Invoice", callback_data="confirm_random")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="il_back_types" if chosen_type else "back_to_type")]
+    ])
+    await message.answer(
+        "🛒 **Random Info-less Order**\n"
+        f"Selection: {'Any type' if chosen_type is None else chosen_type}\n"
+        f"Quantity: {qty}\n"
+        f"Total (from `price` column): **${total_price:.2f} {CURRENCY}**\n\n"
+        "Proceed to invoice?",
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
+
+# --- Option 1: Command Entry (The original way) ---
+
+@router.callback_query(PurchaseState.waiting_for_il_type, F.data == "il_command:prompt")
+async def prompt_il_command_entry(callback: CallbackQuery, state: FSMContext):
+    """Presents the original command prompt for Info-less keys."""
+    await state.set_state(PurchaseState.waiting_for_command)
+    key_type_label = "Info-less"
+    try:
+        # NOTE: is_full_info=False
+        codes_with_count = await fetch_codes_with_count(False)
+        available_codes_formatted = [f"{code_header} ({count} left)" for code_header, count in codes_with_count]
+    except Exception:
+        available_codes_formatted = ["DB ERROR"]
+        logger.exception("Failed to fetch available codes for command menu.")
+
+    command_guide = (
+        f"🔐 **{key_type_label} Key Purchase Guide (Command)**\n\n"
+        f"📝 To place an order, send a command in the following format:\n"
+        f"**Copy/Send this:**\n"
+        f"```\nget_giftCard_by_header:<code> <Quantity>\n```\n"
+        f"✨ Example for buying 10 Keys:\n"
+        f"**`get_giftCard_by_header:456456 10`**\n\n"
+        f"Available codes in stock: {', '.join(available_codes_formatted) if available_codes_formatted else 'None'}"
+    )
+
+    await callback.message.edit_text(
+        command_guide,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Back to Info-less Menu", callback_data="il_back_types")]
+        ])
+    )
+    await callback.answer()
 
 @router.message(PurchaseState.waiting_for_command, F.text.startswith("get_giftCard_by_header:"))
 async def handle_giftCard_purchase_command(message: Message, state: FSMContext):
