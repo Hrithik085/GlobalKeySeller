@@ -101,8 +101,8 @@ class PurchaseState(StatesGroup):
 
 def get_key_type_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Full Info Keys", callback_data="type_select:1")],
-        [InlineKeyboardButton(text="Info-less Keys", callback_data="type_select:0")]
+        [InlineKeyboardButton(text="Full Info CVV", callback_data="type_select:1")],
+        [InlineKeyboardButton(text="Non Info CVV", callback_data="type_select:0")]
     ])
 
 def get_fullinfo_type_keyboard(types_with_count: List[Tuple[str,int]]) -> InlineKeyboardMarkup:
