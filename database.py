@@ -94,18 +94,28 @@ async def initialize_db():
 
               # --- Create price_rules table IF NOT EXISTS (FIXED INDENTATION) ---
               await conn.execute("""
+                  -- NOTE: The UNIQUE constraint on key_type must be changed to a composite key
+                  -- to allow two entries for 'USA' (one Full Info, one Non-Info).
                   CREATE TABLE IF NOT EXISTS price_rules (
                       rule_id SERIAL PRIMARY KEY,
-                      key_type TEXT NOT NULL UNIQUE,
+                      key_type TEXT NOT NULL,
+                      is_full_info BOOLEAN NOT NULL, -- <--- NEW FIELD
                       purchase_mode TEXT NOT NULL DEFAULT 'BY_BIN',
                       fixed_price NUMERIC(10,2) NOT NULL,
-                      is_active BOOLEAN NOT NULL DEFAULT TRUE
+                      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                      UNIQUE (key_type, is_full_info) -- <--- UPDATED UNIQUE CONSTRAINT
                   );
 
-                  -- Insert the specific rule requested (USA type, BY_BIN mode, $17.00 price)
-                  INSERT INTO price_rules (key_type, fixed_price)
-                  VALUES ('USA', 17.00)
-                  ON CONFLICT (key_type) DO UPDATE SET fixed_price = 17.00;
+                  -- Insert the new rules:
+                  -- 1. Full Info USA: $20.00
+                  INSERT INTO price_rules (key_type, is_full_info, fixed_price)
+                  VALUES ('USA', TRUE, 20.00)
+                  ON CONFLICT (key_type, is_full_info) DO UPDATE SET fixed_price = 20.00, is_active = TRUE;
+
+                  -- 2. Non-Info USA: $15.00
+                  INSERT INTO price_rules (key_type, is_full_info, fixed_price)
+                  VALUES ('USA', FALSE, 15.00)
+                  ON CONFLICT (key_type, is_full_info) DO UPDATE SET fixed_price = 15.00, is_active = TRUE;
               """)
               print("PostgreSQL Database table 'price_rules' and initial rules ensured to exist.")
 
@@ -124,14 +134,17 @@ async def check_stock_count_by_type(is_full_info: bool, card_type: Optional[str]
         return count if count is not None else 0
 
 
-async def get_price_rule_by_type(key_type: str, purchase_mode: str = 'BY_BIN') -> Optional[float]:
-    """Fetches a fixed price override for a specific key type and purchase mode."""
+async def get_price_rule_by_type(key_type: str, is_full_info: bool, purchase_mode: str = 'BY_BIN') -> Optional[float]:
+    """Fetches a fixed price override for a specific key type, info status, and purchase mode."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         price = await conn.fetchval("""
             SELECT fixed_price FROM price_rules
-            WHERE key_type = $1 AND purchase_mode = $2 AND is_active = TRUE
-        """, key_type, purchase_mode)
+            WHERE key_type = $1
+              AND is_full_info = $2  -- <-- NEW CONDITION
+              AND purchase_mode = $3
+              AND is_active = TRUE
+        """, key_type, is_full_info, purchase_mode) # <-- NEW PARAMETER
 
         return float(price) if price is not None else None
 

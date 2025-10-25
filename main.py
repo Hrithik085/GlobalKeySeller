@@ -575,17 +575,29 @@ async def il_back_to_types(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("il_bin:"))
 async def handle_il_bin_choice(callback: CallbackQuery, state: FSMContext):
     _, card_type, key_header = callback.data.split(":", 2)
-    # NOTE: is_full_info=False
-    await state.update_data(is_full_info=False, selected_type=card_type, code=key_header)
+
+    is_full_info = False # Non-Info context
+    await state.update_data(is_full_info=is_full_info, selected_type=card_type, code=key_header)
     await state.set_state(PurchaseState.waiting_for_il_bin_qty)
 
     # Check current unit price and available stock to guide the user
-    available = await check_stock_count(key_header, False)
-    unit_price = await get_price_by_header(key_header, False)
+    available = await check_stock_count(key_header, is_full_info)
+
+    # --- PRICE OVERRIDE CHECK START (Updated to use is_full_info) ---
+    override_price = await get_price_rule_by_type(card_type, is_full_info, purchase_mode='BY_BIN')
+
+    if override_price is not None:
+        # Use the fixed price if the rule is found (e.g., $15.00 for Non Info USA)
+        display_price = override_price
+    else:
+        # Otherwise, fall back to the price stored in the inventory table
+        inventory_price = await get_price_by_header(key_header, is_full_info)
+        display_price = inventory_price if inventory_price is not None else KEY_PRICE_INFOLESS
+    # --- PRICE OVERRIDE CHECK END ---
 
     await callback.message.edit_text(
         f"BIN **{key_header}** (Type **{card_type}**) selected. "
-        f"Stock: {available}. Price: ${unit_price:.2f}/key.\n"
+        f"Stock: {available}. Price: **${display_price:.2f}** /key.\n"
         "Enter **quantity** (e.g., `5`).",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -595,13 +607,16 @@ async def handle_il_bin_choice(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # You must ensure get_price_rule_by_type is imported from database.py at the top
+# Assuming the necessary change has been made to the get_price_rule_by_type signature
+# in database.py (to accept is_full_info as the second argument).
+
 @router.message(PurchaseState.waiting_for_il_bin_qty, F.text.regexp(r"^\d{1,4}$"))
 async def handle_il_bin_qty(message: Message, state: FSMContext):
     """Handles quantity input for a fixed Info-less BIN/Header."""
     qty = int(message.text)
     data = await state.get_data()
     key_header = data["code"]
-    is_full_info = False # Info-less flow
+    is_full_info = False # Info-less context (FALSE)
     card_type = data.get("selected_type") # Type is needed for the override check
 
     available = await check_stock_count(key_header, is_full_info)
@@ -611,8 +626,9 @@ async def handle_il_bin_qty(message: Message, state: FSMContext):
 
     # --- PRICE LOGIC MODIFICATION START ---
 
-    # 1. Check database for fixed price rule (e.g., USA=$17.00 BY_BIN rule)
-    override_price = await get_price_rule_by_type(card_type, purchase_mode='BY_BIN')
+    # 1. Check database for fixed price rule (e.g., USA=$15.00 BY_BIN rule)
+    # MODIFICATION: Pass is_full_info=False
+    override_price = await get_price_rule_by_type(card_type, is_full_info, purchase_mode='BY_BIN')
 
     if override_price is not None:
         unit_price = override_price
@@ -868,29 +884,24 @@ def _run_sync_invoice_creation(total_price, user_id, code_header, quantity):
 async def handle_bin_choice(callback: CallbackQuery, state: FSMContext):
     _, card_type, key_header = callback.data.split(":", 2)
 
-    # NOTE: is_full_info=True for Full Info flow
-    await state.update_data(is_full_info=True, selected_type=card_type, code=key_header)
+    is_full_info = True # Full Info context
+    await state.update_data(is_full_info=is_full_info, selected_type=card_type, code=key_header)
     await state.set_state(PurchaseState.waiting_for_bin_qty)
 
     # Check current unit price and available stock to guide the user
-    available = await check_stock_count(key_header, True) # Use True for Full Info
+    available = await check_stock_count(key_header, is_full_info)
 
-    # --- PRICE OVERRIDE CHECK START ---
-    override_price = await get_price_rule_by_type(card_type, purchase_mode='BY_BIN')
+    # --- PRICE OVERRIDE CHECK START (Updated to use is_full_info) ---
+    override_price = await get_price_rule_by_type(card_type, is_full_info, purchase_mode='BY_BIN')
 
     if override_price is not None:
-        # Use the fixed price if the rule is found (e.g., $17 for USA)
+        # Use the fixed price if the rule is found (e.g., $20.00 for Full Info USA)
         display_price = override_price
     else:
         # Otherwise, fall back to the price stored in the inventory table
-        inventory_price = await get_price_by_header(key_header, True)
-        # Use fallback price if not found in inventory
+        inventory_price = await get_price_by_header(key_header, is_full_info)
         display_price = inventory_price if inventory_price is not None else KEY_PRICE_FULL
     # --- PRICE OVERRIDE CHECK END ---
-
-    # NOTE: We DO NOT store the calculated display_price in state yet,
-    # as the final unit price calculation is better left to handle_bin_qty
-    # to ensure consistency with the MINIMUM_USD check.
 
     await callback.message.edit_text(
         f"BIN **{key_header}** (Type **{card_type}**) selected. "
@@ -902,12 +913,15 @@ async def handle_bin_choice(callback: CallbackQuery, state: FSMContext):
         ])
     )
     await callback.answer()
+
+
+
 @router.message(PurchaseState.waiting_for_bin_qty, F.text.regexp(r"^\d{1,4}$"))
 async def handle_bin_qty(message: Message, state: FSMContext):
     qty = int(message.text)
     data = await state.get_data()
     key_header = data["code"]
-    is_full_info = True
+    is_full_info = True # Full Info context (TRUE)
     card_type = data.get("selected_type") # Type is needed for the override check
 
     # check stock
@@ -918,8 +932,9 @@ async def handle_bin_qty(message: Message, state: FSMContext):
 
     # --- PRICE LOGIC MODIFICATION START ---
 
-    # 1. Check database for fixed price rule (e.g., USA=$17.00 BY_BIN rule)
-    override_price = await get_price_rule_by_type(card_type, purchase_mode='BY_BIN')
+    # 1. Check database for fixed price rule (e.g., USA=$20.00 BY_BIN rule)
+    # MODIFICATION: Pass is_full_info=True as the second argument
+    override_price = await get_price_rule_by_type(card_type, is_full_info, purchase_mode='BY_BIN')
 
     if override_price is not None:
         unit_price = override_price
@@ -938,18 +953,31 @@ async def handle_bin_qty(message: Message, state: FSMContext):
 
     total_price = qty * unit_price
 
-    await state.update_data(quantity=qty, price=total_price, unit_price=unit_price, user_id=message.from_user.id)
+    await state.update_data(
+        quantity=qty,
+        price=total_price,
+        unit_price=unit_price,
+        user_id=message.from_user.id,
+        is_full_info=is_full_info # Explicitly store the context
+    )
     await state.set_state(PurchaseState.waiting_for_confirmation)
-    await message.answer(
-        "🛒 **BIN Order Confirmation**\n"
+
+    confirmation_message = (
+        f"🛒 **BIN Order Confirmation**\n"
         f"BIN: `{key_header}`\n"
         f"Quantity: {qty}\n"
         f"Unit: **${unit_price:.2f} {CURRENCY}**\n"
         f"Total: **${total_price:.2f} {CURRENCY}**\n\n"
-        "Proceed to invoice?",
-        parse_mode="Markdown",
-        reply_markup=get_confirmation_keyboard(key_header, qty)
+        "Proceed to invoice?"
     )
+
+    await message.answer(
+        confirmation_message,
+        reply_markup=get_confirmation_keyboard(key_header, qty),
+        parse_mode="Markdown"
+    )
+
+
 
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data.startswith("confirm"))
 async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext):
