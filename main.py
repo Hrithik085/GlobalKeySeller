@@ -819,9 +819,9 @@ async def prompt_il_command_entry(callback: CallbackQuery, state: FSMContext):
         f"🔐 **{key_type_label} Key Purchase Guide (Command)**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
         f"**Copy/Send this:**\n"
-        f"```\nget_giftCard_by_header:<code> <Quantity>\n```\n"
+        f"```\nget_Card_by_bin:<code> <Quantity>\n```\n"
         f"✨ Example for buying 10 Keys:\n"
-        f"**`get_giftCard_by_header:456456 10`**\n\n"
+        f"**`get_Card_by_bin:456456 10`**\n\n"
         f"Available codes in stock: {', '.join(available_codes_formatted) if available_codes_formatted else 'None'}"
     )
 
@@ -834,7 +834,7 @@ async def prompt_il_command_entry(callback: CallbackQuery, state: FSMContext):
         parse_mode="Markdown"
     )
 
-@router.message(PurchaseState.waiting_for_command, F.text.startswith("get_giftCard_by_header:"))
+@router.message(PurchaseState.waiting_for_command, F.text.startswith("get_Card_by_bin:"))
 async def handle_giftCard_purchase_command(message: Message, state: FSMContext):
     try:
         parts = message.text.split(":", 1)
@@ -918,7 +918,7 @@ async def handle_giftCard_purchase_command(message: Message, state: FSMContext):
     except (IndexError, ValueError):
         await message.answer(
             "❌ **Error:** Please use the correct format:\n"
-            "Example: `get_giftCard_by_header:456456 10`",
+            "Example: `get_Card_by_bin:456456 10`",
             parse_mode='Markdown'
         )
     except Exception:
