@@ -23,8 +23,8 @@ from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
-from aiogram.methods import SetWebhook, DeleteWebhook 
-from nowpayments import NOWPayments 
+from aiogram.methods import SetWebhook, DeleteWebhook
+from nowpayments import NOWPayments
 
 
 
@@ -57,8 +57,8 @@ if not BOT_TOKEN:
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # NOWPayments Setup
-NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
-# NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") 
+NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY")
+# NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
 NOWPAYMENTS_IPN_SECRET="k+GjXt7FE4bxnOoEwC7Xd3nlyWhpSa2d"
 MINIMUM_USD = float(os.getenv("MINIMUM_USD", "15.0"))
 SUPPORT_CONTACT_HANDLE = "@berkher"
@@ -79,10 +79,10 @@ nowpayments_client = NOWPayments(os.getenv("NOWPAYMENTS_API_KEY"))
 
 # Webhook Constants
 WEBHOOK_PATH = "/telegram"
-PAYMENT_WEBHOOK_PATH = "/nowpayments-ipn" 
+PAYMENT_WEBHOOK_PATH = "/nowpayments-ipn"
 BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL") or (f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}")
 FULL_WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
-FULL_IPN_URL = f"{BASE_WEBHOOK_URL}{PAYMENT_WEBHOOK_PATH}" 
+FULL_IPN_URL = f"{BASE_WEBHOOK_URL}{PAYMENT_WEBHOOK_PATH}"
 
 
 # --- 2. FSM States and Keyboards ---
@@ -657,8 +657,10 @@ async def handle_il_bin_choice(callback: CallbackQuery, state: FSMContext):
     override_price = await get_price_rule_by_type(card_type, is_full_info, purchase_mode='BY_BIN')
 
     if override_price is not None:
+        # Use the fixed price if the rule is found (e.g., $15.00 for Non Info USA)
         display_price = override_price
     else:
+        # Otherwise, fall back to the price stored in the inventory table
         inventory_price = await get_price_by_header(key_header, is_full_info)
         display_price = inventory_price if inventory_price is not None else KEY_PRICE_INFOLESS
     # --- PRICE OVERRIDE CHECK END ---
@@ -671,7 +673,7 @@ async def handle_il_bin_choice(callback: CallbackQuery, state: FSMContext):
         "Enter **quantity** (e.g., `5`).",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Back", callback_data="il_back_types")] # <--- FIX APPLIED
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="il_back_types")] # FIXED to use generic back
         ])
     )
     await callback.answer()
@@ -1207,7 +1209,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
 
     # 3. Store the final validated data and REDIRECT (SUCCESS PATH)
 
-    await state.set_state(PurchaseState.waiting_for_crypto_choice)
+await state.set_state(PurchaseState.waiting_for_crypto_choice)
     await state.update_data(
         # Pass the current, validated data dictionary to the next state for invoicing
         confirmed_order_data=data
@@ -1342,54 +1344,7 @@ async def handle_crypto_choice_and_invoice(callback: CallbackQuery, state: FSMCo
         raw_invoice_response=invoice_response
     )
 
-    # RENDER MESSAGE (using final_message/payment_keyboard logic from original handle_invoice_confirmation)
-   payment_url = extract_payment_url(invoice_response or {})
 
-       # Extract manual payment details for fallback
-       pay_address, pay_amount, pay_currency, network, invoice_id = _extract_low_level_payment_details(invoice_response or {})
-       invoice_id = invoice_id or "N/A" # Ensure invoice_id is set
-
-       final_message = (
-           f"🔒 **Invoice Generated!**\n"
-           f"Amount: **${total_price:.2f} {CURRENCY}**\n"
-           f"Pay With: {pay_currency.upper()}\n"
-           f"Order ID: `{invoice_response.get('order_id')}`\n\n"
-       )
-
-       if payment_url:
-           final_message += "Click the button below to complete payment and receive your keys instantly."
-           payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-               [InlineKeyboardButton(text="Pay Now", url=payment_url)]
-           ])
-           await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode="Markdown")
-
-       elif pay_address and pay_amount:
-           # Fallback: Show 'Show Payment Details' button for manual payment
-
-           final_message += f"Invoice ID: `{invoice_id}`\n\n"
-           final_message += (
-               "Tap the button below to view exact payment details (address, amount and network) so you can pay manually.\n\n"
-           )
-           cb_invoice_identifier = invoice_id if invoice_id != "N/A" else (invoice_response.get("payment_id") or invoice_response.get("pay_id") or "unknown")
-           payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-               [InlineKeyboardButton(text="Show Payment Details", callback_data=f"show_payment:{cb_invoice_identifier}")]
-           ])
-           await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode="Markdown")
-
-           # Send follow-up support message (as you had before)
-           try:
-               await callback.message.answer(
-                   "If you need help completing payment, contact our support with the Order ID shown above.\n\n"
-                   f"Support: {SUPPORT_URL}",
-                   parse_mode="Markdown"
-               )
-           except Exception:
-               logger.debug("Could not send follow-up support message to the user.")
-
-       else:
-           # Absolute failure case (no URL, no manual address details)
-           final_message += f"Payment processing failed. Please contact support ({SUPPORT_URL}) with your Order ID."
-           await callback.message.edit_text(final_message, parse_mode="Markdown")
 
 # 3. C. Back to Confirmation Button
 
