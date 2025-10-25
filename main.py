@@ -319,9 +319,12 @@ def get_confirmation_keyboard(code_header: str, quantity: int) -> InlineKeyboard
         [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_type")]
     ])
 
-@router.callback_query(PurchaseState.waiting_for_type, F.data.startswith("type_select"))
+# CORRECTED: Add the main menu states (FI/IL Type Selection) to catch the top-level back button.
+@router.callback_query(F.data.startswith("type_select")) # Catches initial menu selection
 @router.callback_query(PurchaseState.waiting_for_command, F.data == "back_to_type")
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type")
+@router.callback_query(PurchaseState.waiting_for_fi_type, F.data == "back_to_type")     # <--- ADDED
+@router.callback_query(PurchaseState.waiting_for_il_type, F.data == "back_to_type")     # <--- ADDED
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     if callback.data == "back_to_type":
         await start_handler(callback.message, state)
