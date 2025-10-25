@@ -320,11 +320,13 @@ def get_confirmation_keyboard(code_header: str, quantity: int) -> InlineKeyboard
     ])
 
 # CORRECTED: Add the main menu states (FI/IL Type Selection) to catch the top-level back button.
-@router.callback_query(F.data.startswith("type_select")) # Catches initial menu selection
+@router.callback_query(F.data.startswith("type_select"))
 @router.callback_query(PurchaseState.waiting_for_command, F.data == "back_to_type")
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type")
-@router.callback_query(PurchaseState.waiting_for_fi_type, F.data == "back_to_type")     # <--- ADDED
-@router.callback_query(PurchaseState.waiting_for_il_type, F.data == "back_to_type")     # <--- ADDED
+@router.callback_query(PurchaseState.waiting_for_fi_type, F.data == "back_to_type")
+@router.callback_query(PurchaseState.waiting_for_il_type, F.data == "back_to_type")
+@router.callback_query(PurchaseState.waiting_for_random_qty, F.data == "back_to_type")      # <--- ADDED FIX: FI Random QTY
+@router.callback_query(PurchaseState.waiting_for_il_random_qty, F.data == "back_to_type")  # <--- ADDED FIX: IL Random QTY
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
     if callback.data == "back_to_type":
         await start_handler(callback.message, state)
@@ -390,7 +392,14 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
 
 
+# New handler to bridge the random quantity screens back to the main start menu via back_to_type
 
+@router.callback_query(F.data == "back_to_type", PurchaseState.waiting_for_random_qty)
+@router.callback_query(F.data == "back_to_type", PurchaseState.waiting_for_il_random_qty)
+async def back_from_random_qty_to_start(callback: CallbackQuery, state: FSMContext):
+    """Handles 'Back' button when coming from random quantity input for 'any type'."""
+    await start_handler(callback.message, state)
+    await callback.answer()
 
 @router.callback_query(PurchaseState.waiting_for_fi_type, F.data.startswith("fi_type:"))
 async def handle_fi_type(callback: CallbackQuery, state: FSMContext):
