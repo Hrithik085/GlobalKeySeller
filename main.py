@@ -61,7 +61,8 @@ NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY")
 # NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") 
 NOWPAYMENTS_IPN_SECRET="k+GjXt7FE4bxnOoEwC7Xd3nlyWhpSa2d"
 MINIMUM_USD = float(os.getenv("MINIMUM_USD", "15.0"))
-
+SUPPORT_CONTACT_HANDLE = "@berkher"
+SUPPORT_URL = f"https://t.me/{SUPPORT_CONTACT_HANDLE.lstrip('@')}"
 
 if not NOWPAYMENTS_API_KEY:
     logger.critical("NOWPAYMENTS_API_KEY is missing. Payment generation will fail.")
@@ -255,19 +256,25 @@ async def _iter_lines_from_body(text_body: str) -> list[str]:
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(PurchaseState.waiting_for_type)
+
+    # Assuming SUPPORT_URL = "https://t.me/berkher" is defined globally
+    support_url = SUPPORT_URL if 'SUPPORT_URL' in globals() else "https://t.me/berkher"
+
     welcome_text = (
         "🌟 **Welcome to Rockers GiftgiftCard Shop!** 💳\n\n"
         "We offer high-quality Keys:\n"
         "  • Full Info CVV\n"
-        "  • Full Info CVV\n\n"
+        "  • Non Info CVV\n\n"  # Corrected "Full Info CVV" redundancy
         "💎 **Features:**\n"
         "  • 24/7 Service\n"
         "  • Instant Delivery\n"
         "  • Secure Transactions\n\n"
         "📊 Track all your transactions\n\n"
         "🔐 Your security is our top priority\n\n"
+        "🆘 **Need Help?** Contact Support: [berkher](%s)\n\n"
         "**Please choose your product type below:**"
-    )
+    ) % support_url
+
     await message.answer(welcome_text, reply_markup=get_key_type_keyboard())
 
 
@@ -1190,7 +1197,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             pay_currency = invoice_response.get("pay_currency") or invoice_response.get("price_currency") or "USD"
             network = invoice_response.get("network") or invoice_response.get("chain") or "N/A"
 
-            support_contact = os.getenv("SUPPORT_CONTACT", "support@yourdomain.com")
+            support_contact = SUPPORT_URL
             logger.warning("NOWPayments returned invoice without payment URL after retries. order_id=%s invoice_id=%s user_id=%s",
                            invoice_response.get("order_id"), invoice_id, user_id)
             final_message += f"Invoice ID: `{invoice_id}`\n\n"
@@ -1198,7 +1205,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             if pay_address and pay_amount:
                 final_message += (
                     "Tap the button below to view exact payment details (address, amount and network) so you can pay manually.\n\n"
-                    f"If you need help, contact support ({support_contact})."
+                    f"If you need help, contact support here: {SUPPORT_URL}."
                 )
                 cb_invoice_identifier = invoice_id if invoice_id != "N/A" else (invoice_response.get("payment_id") or invoice_response.get("pay_id") or "unknown")
                 payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1207,7 +1214,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
                 await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode="Markdown")
             else:
                 final_message += (
-                    f"Please contact support ({support_contact}) or try again in a moment. "
+                    f"Please contact support ({SUPPORT_URL}) or try again in a moment. "
                     "If you believe this is an error, provide the Order ID above to support."
                 )
                 await callback.message.edit_text(final_message, parse_mode="Markdown")
@@ -1215,7 +1222,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             try:
                 await callback.message.answer(
                     "If you need help completing payment, contact our support with the Order ID shown above.\n\n"
-                    f"Support: {support_contact}",
+                    f"Support: {SUPPORT_URL}",
                     parse_mode="Markdown"
                 )
             except Exception:
