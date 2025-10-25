@@ -867,11 +867,35 @@ def _run_sync_invoice_creation(total_price, user_id, code_header, quantity):
 @router.callback_query(PurchaseState.waiting_for_fi_type, F.data.startswith("fi_bin:"))
 async def handle_bin_choice(callback: CallbackQuery, state: FSMContext):
     _, card_type, key_header = callback.data.split(":", 2)
+
+    # NOTE: is_full_info=True for Full Info flow
     await state.update_data(is_full_info=True, selected_type=card_type, code=key_header)
     await state.set_state(PurchaseState.waiting_for_bin_qty)
+
+    # Check current unit price and available stock to guide the user
+    available = await check_stock_count(key_header, True) # Use True for Full Info
+
+    # --- PRICE OVERRIDE CHECK START ---
+    override_price = await get_price_rule_by_type(card_type, purchase_mode='BY_BIN')
+
+    if override_price is not None:
+        # Use the fixed price if the rule is found (e.g., $17 for USA)
+        display_price = override_price
+    else:
+        # Otherwise, fall back to the price stored in the inventory table
+        inventory_price = await get_price_by_header(key_header, True)
+        # Use fallback price if not found in inventory
+        display_price = inventory_price if inventory_price is not None else KEY_PRICE_FULL
+    # --- PRICE OVERRIDE CHECK END ---
+
+    # NOTE: We DO NOT store the calculated display_price in state yet,
+    # as the final unit price calculation is better left to handle_bin_qty
+    # to ensure consistency with the MINIMUM_USD check.
+
     await callback.message.edit_text(
-        f"BIN **{key_header}** in type **{card_type}** selected.\n"
-        "Enter **quantity** (e.g., `5`).",
+        f"BIN **{key_header}** (Type **{card_type}**) selected. "
+        f"Stock: {available}. Price: **${display_price:.2f}** /key.\n" # Use the calculated display_price
+        "Enter **quantity** (e.g., 5).",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Back", callback_data=f"fi_type:{card_type}")]
