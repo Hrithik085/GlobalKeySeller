@@ -1289,9 +1289,8 @@ async def handle_crypto_choice_and_invoice(callback: CallbackQuery, state: FSMCo
         await state.clear()
         return
 
-    # 2. Create the invoice with retries (similar to original logic)
+    # 2. Create the invoice with retries (Robust logging added)
     loop = asyncio.get_event_loop()
-    # ... (Helper function definitions remain the same, just need to be in scope) ...
 
     max_attempts = 3
     attempt = 0
@@ -1311,35 +1310,39 @@ async def handle_crypto_choice_and_invoice(callback: CallbackQuery, state: FSMCo
                     pay_currency=pay_currency
                 )
             )
-            # Check for API-level errors even if the request succeeds (e.g., bad API key response)
+            # Check for NOWPayments API-level errors
             if invoice_response and invoice_response.get("error"):
                  logger.error("NOWPayments API Error: %s", invoice_response)
+                 # Raise runtime error to stop loop and fall to final rendering failure path
                  raise RuntimeError(f"NOWPayments API failed: {invoice_response.get('error_message')}")
 
             if invoice_response and invoice_response.get("order_id"):
                 break
             await asyncio.sleep(0.8 * attempt)
 
-        except Exception as exc: # <--- CATCH THE SPECIFIC EXCEPTION
-            logger.exception("NOWPayments creation failed on attempt %s", attempt, exc_info=exc)
+        except Exception as exc:
+            # Log the exception details clearly for debugging
+            logger.exception("NOWPayments API creation failed on attempt %s. Error: %s", attempt, exc)
             await asyncio.sleep(0.8 * attempt)
 
-    # --- After the loop fails ---
-    if not invoice_response:
-        logger.error("Invoice creation failed after all retries.")
-        await callback.message.edit_text("❌ Failed to generate invoice after multiple tries. Please check logs for API error.", parse_mode="Markdown")
+    # --- 3. Final Check, Save Order & Render Result ---
+
+    if not invoice_response or not invoice_response.get('order_id'):
+        logger.error("Invoice creation failed after all retries. No valid order_id returned.")
+        await callback.message.edit_text(
+            "❌ **Payment Error:** Failed to generate invoice after multiple retries. Please try again or contact support.",
+            parse_mode="Markdown"
+        )
         await state.clear()
         return
 
-    # ... (Rest of the function continues on success) ...
-    # 3. Save Order & Render Result (similar to original logic)
 
     # Get the order type value correctly from confirmed data
     mode = order_data.get("mode")
     order_type_value = ("any" if (mode == "random" and chosen_type is None) else (chosen_type or "unknown"))
 
+    # Save Order in DB
     try:
-        # Save order in DB (using order_data)
         await save_order(
             order_id=invoice_response.get("order_id"),
             user_id=user_id,
@@ -1362,6 +1365,53 @@ async def handle_crypto_choice_and_invoice(callback: CallbackQuery, state: FSMCo
         raw_invoice_response=invoice_response
     )
 
+    # RENDER MESSAGE
+    payment_url = extract_payment_url(invoice_response or {})
+
+    # Extract manual payment details for fallback
+    pay_address, pay_amount, pay_currency_actual, network, invoice_id_detail = _extract_low_level_payment_details(invoice_response or {})
+
+    final_message = (
+        f"🔒 **Invoice Generated!**\n"
+        f"Amount: **${total_price:.2f} {CURRENCY}**\n"
+        f"Pay With: {pay_currency.upper()}\n"
+        f"Order ID: `{invoice_response.get('order_id')}`\n\n"
+    )
+
+    if payment_url:
+        final_message += "Click the button below to complete payment and receive your keys instantly."
+        payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Pay Now", url=payment_url)]
+        ])
+        await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode="Markdown")
+
+    elif pay_address and pay_amount:
+        # Fallback: Show 'Show Payment Details' button for manual payment
+        invoice_id_display = invoice_response.get('invoice_id') or invoice_id_detail
+
+        final_message += f"Invoice ID: `{invoice_id_display}`\n\n"
+        final_message += (
+            "Tap the button below to view exact payment details (address, amount and network) so you can pay manually.\n\n"
+        )
+        cb_invoice_identifier = invoice_id_display
+        payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Show Payment Details", callback_data=f"show_payment:{cb_invoice_identifier}")]
+        ])
+        await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode="Markdown")
+
+        try:
+            await callback.message.answer(
+                "If you need help completing payment, contact our support with the Order ID shown above.\n\n"
+                f"Support: {SUPPORT_URL}",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            logger.debug("Could not send follow-up support message to the user.")
+
+    else:
+        # Absolute failure case (no URL, no manual address details)
+        final_message += f"Payment processing failed. Please contact support ({SUPPORT_URL}) with your Order ID."
+        await callback.message.edit_text(final_message, parse_mode="Markdown")
 
 
 # 3. C. Back to Confirmation Button
