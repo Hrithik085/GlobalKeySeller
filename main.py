@@ -417,12 +417,18 @@ async def handle_fi_type(callback: CallbackQuery, state: FSMContext):
         )
     await callback.answer()
 
-@router.callback_query(PurchaseState.waiting_for_fi_type, F.data == "fi_back_types")
+# FIX: Adjusted decorators to catch calls from the downstream input states (random qty, bin qty).
+@router.callback_query(F.data == "fi_back_types")
 async def back_to_types(callback: CallbackQuery, state: FSMContext):
+    # This handler is called when returning from a detail/quantity input screen (like waiting_for_bin_qty)
     try:
         types_with_count = await fetch_types_with_count(True)
     except Exception:
         types_with_count = []
+
+    # Reset state to the Full Info selection menu
+    await state.set_state(PurchaseState.waiting_for_fi_type)
+
     await callback.message.edit_text(
         "Select a **type**:",
         reply_markup=get_fullinfo_type_keyboard(types_with_count),
@@ -583,7 +589,7 @@ async def handle_il_type(callback: CallbackQuery, state: FSMContext):
         )
     await callback.answer()
 
-@router.callback_query(PurchaseState.waiting_for_il_type, F.data == "il_back_types")
+# FIX: Simplified decorator to catch calls from downstream states.
 @router.callback_query(F.data == "il_back_types")
 async def il_back_to_types(callback: CallbackQuery, state: FSMContext):
     """Go back to the top-level Info-less type menu."""
@@ -592,7 +598,9 @@ async def il_back_to_types(callback: CallbackQuery, state: FSMContext):
     except Exception:
         types_with_count = []
 
+    # Reset state to the Info-less selection menu
     await state.set_state(PurchaseState.waiting_for_il_type)
+
     await callback.message.edit_text(
         "Select a **type** for Info-less Keys:",
         reply_markup=get_infoless_type_keyboard(types_with_count),
