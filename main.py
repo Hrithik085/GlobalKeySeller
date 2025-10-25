@@ -1210,21 +1210,21 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
 
 
     # 3. Store the final validated data and REDIRECT (SUCCESS PATH)
-         await state.set_state(PurchaseState.waiting_for_crypto_choice)
-         await state.update_data(
+await state.set_state(PurchaseState.waiting_for_crypto_choice)
+    await state.update_data(
         # Pass the current, validated data dictionary to the next state for invoicing
-         confirmed_order_data=data
-         )
+        confirmed_order_data=data
+    )
 
     # 4. Redirect user to the crypto selection menu
-         await callback.message.edit_text(
+    await callback.message.edit_text(
         "🪙 **Choose Your Payment Currency**\n\n"
         f"Your total amount due is **${total_price:.2f} {CURRENCY}**.\n"
         "Please select the cryptocurrency you wish to pay with:",
         reply_markup=get_crypto_choice_keyboard(),
         parse_mode="Markdown"
-         )
-         await callback.answer()
+    )
+    await callback.answer()
 
 
 def extract_payment_url(resp: dict) -> Optional[str]:
