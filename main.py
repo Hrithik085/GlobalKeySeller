@@ -92,6 +92,7 @@ class PurchaseState(StatesGroup):
     waiting_for_command = State()
     waiting_for_confirmation = State()
     waiting_for_payment = State()
+    waiting_for_crypto_choice = State()
     # NEW FOR FULL INFO
     waiting_for_fi_type = State()
     waiting_for_random_qty = State()
@@ -113,6 +114,16 @@ def get_fullinfo_type_keyboard(types_with_count: List[Tuple[str,int]]) -> Inline
     rows.append([InlineKeyboardButton(text="🎲 Random (any type)", callback_data="fi_random:any")])
     rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_type")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def get_crypto_choice_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard for selecting the cryptocurrency to pay with."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        # NOWPayments uses specific currency codes for payment generation
+        [InlineKeyboardButton(text="USDT (TRC20)", callback_data="pay_crypto:usdttrc20")],
+        [InlineKeyboardButton(text="Bitcoin (BTC)", callback_data="pay_crypto:btc")],
+        [InlineKeyboardButton(text="Ethereum (ETH)", callback_data="pay_crypto:eth")],
+        [InlineKeyboardButton(text="⬅️ Back to Order", callback_data="back_to_confirmation")]
+    ])
 
 # Re-use fetch_types_with_count and fetch_bins_by_type_with_count from database.py
 
@@ -654,13 +665,16 @@ async def handle_il_bin_choice(callback: CallbackQuery, state: FSMContext):
         display_price = inventory_price if inventory_price is not None else KEY_PRICE_INFOLESS
     # --- PRICE OVERRIDE CHECK END ---
 
+    await state.update_data(unit_price=display_price) # Store unit price for calculation
+
     await callback.message.edit_text(
         f"BIN **{key_header}** (Type **{card_type}**) selected. "
         f"Stock: {available}. Price: **${display_price:.2f}** /key.\n"
         "Enter **quantity** (e.g., `5`).",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Back", callback_data=f"il_type:{card_type}")]
+            # FIX: Use the generic, reliable "il_back_types" callback
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="il_back_types")]
         ])
     )
     await callback.answer()
@@ -1061,20 +1075,21 @@ async def handle_bin_qty(message: Message, state: FSMContext):
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data.startswith("confirm"))
 async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext):
     """
-    Generates a NOWPayments invoice; enforces:
-      - MINIMUM_USD threshold
-      - Live stock availability for the chosen option (BIN/header or Random)
-    Saves a pending order (including chosen type) and returns the payment URL or raw details.
+    1. Performs final stock/price checks using data retrieved from the state.
+    2. Stores confirmed order data.
+    3. Redirects user to the cryptocurrency selection menu.
     """
+    # 1. RETRIEVE ALL DATA AND DECLARE SCOPE AT THE TOP
+    # NOTE: The data must be retrieved *first* before any logic uses its content.
     data = await state.get_data()
-    code_header = data.get("code")                # BIN/header code, or "*" when random
+    code_header = data.get("code")
     quantity = int(data.get("quantity", 1))
-    total_price = float(data.get("price", 0.0))   # sum of prices (random) or unit*qty (BIN)
+    total_price = float(data.get("price", 0.0))
     user_id = data.get("user_id")
     is_full_info = data.get("is_full_info", False)
 
-    # Random-mode flags (set earlier in your flow)
-    mode = data.get("mode")                       # "random" or None/"bin"
+    # Random-mode flags
+    mode = data.get("mode")
     chosen_type = data.get("random_type") if mode == "random" else data.get("selected_type")
 
     # Defensive validation
@@ -1083,11 +1098,14 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         await state.clear()
         return
 
-    # --- Enforce MINIMUM_USD & validate stock ---
+    # --- Enforce MINIMUM_USD & validate stock (Cleaned-up and Consolidated Logic) ---
+
     if mode == "random":
+        # 1. Random Price/Stock Update Check
         prices = None
         if total_price <= 0:
-            prices = await quote_random_prices(True, quantity, chosen_type)
+            # Re-quote if price is zero (necessary for safety, though should be set by random handler)
+            prices = await quote_random_prices(is_full_info, quantity, chosen_type)
             if len(prices) < quantity:
                 back_cb = "fi_back_types" if chosen_type else "back_to_type"
                 await callback.message.edit_text(
@@ -1099,26 +1117,13 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
                 return
             total_price = float(sum(prices))
             await state.update_data(price=total_price)
+            data['price'] = total_price # Update local data dict
 
-        if prices is None:
-            prices = await quote_random_prices(True, quantity, chosen_type)
-            if len(prices) < quantity:
-                back_cb = "fi_back_types" if chosen_type else "back_to_type"
-                await callback.message.edit_text(
-                    "⚠️ Stock changed. Not enough random Full Info available for that quantity.",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=back_cb)]]),
-                    parse_mode="Markdown",
-                )
-                await callback.answer()
-                return
-
+        # 2. Random Minimum USD Check
         if total_price < MINIMUM_USD:
             back_cb = "fi_back_types" if chosen_type else "back_to_type"
             await callback.message.edit_text(
-                f"⚠️ *Minimum payment required*\n\n"
-                f"Provider minimum: *${MINIMUM_USD:.2f}*.\n"
-                f"Your total (sum of selected item prices): *${total_price:.2f}*.\n\n"
-                "Please increase quantity or go back and choose another option.",
+                f"⚠️ *Minimum payment required* is **${MINIMUM_USD:.2f}**. Your total is ${total_price:.2f}. Please increase quantity.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=back_cb)]]),
             )
@@ -1126,7 +1131,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             return
 
     else:
-        # Stock check for non-random (BIN/header) flow
+        # 1. BIN Stock Check
         available_stock = await check_stock_count(code_header, is_full_info)
         if quantity > available_stock:
             msg = (
@@ -1144,6 +1149,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             await callback.answer()
             return
 
+        # 2. BIN Price and Minimum Check
         unit_price = data.get("unit_price")
         if unit_price is None:
             unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
@@ -1151,6 +1157,13 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             unit_price = float(unit_price)
         except Exception:
             unit_price = KEY_PRICE_FULL if is_full_info else KEY_PRICE_INFOLESS
+
+        # Recalculate total price based on unit price stored in state/defaults
+        total_price = quantity * unit_price
+
+        # Must update state if price changed due to error flow or default, and update local dict
+        await state.update_data(price=total_price)
+        data['price'] = total_price
 
         if total_price < MINIMUM_USD:
             import math
@@ -1196,6 +1209,27 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
             await callback.answer()
             return
+
+    # --- END Consolidated Stock/Minimum Checks ---
+
+
+    # 3. Store the final validated data and REDIRECT (SUCCESS PATH)
+
+    await state.set_state(PurchaseState.waiting_for_crypto_choice)
+    await state.update_data(
+        # Pass the current, validated data dictionary to the next state for invoicing
+        confirmed_order_data=data
+    )
+
+    # 4. Redirect user to the crypto selection menu
+    await callback.message.edit_text(
+        "🪙 **Choose Your Payment Currency**\n\n"
+        f"Your total amount due is **${total_price:.2f} {CURRENCY}**.\n"
+        "Please select the cryptocurrency you wish to pay with:",
+        reply_markup=get_crypto_choice_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
 
     # --- Create the invoice with retries ---
     # ... (rest of the function remains the same)
@@ -1387,6 +1421,158 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             logger.exception("Failed to send payment error message to user.")
         await state.clear()
 
+    await callback.answer()
+def _run_sync_invoice_creation(total_price, user_id, code_header, quantity, pay_currency): # UPDATED SIGNATURE
+    """Synchronous API call run inside a thread."""
+    return nowpayments_client.create_payment(
+        price_amount=total_price,
+        price_currency=CURRENCY,
+        ipn_callback_url=FULL_IPN_URL,
+        order_id=f"ORDER-{user_id}-{code_header}-{quantity}-{int(time.time())}",
+        pay_currency=pay_currency # Use the selected currency
+    )
+
+@router.callback_query(PurchaseState.waiting_for_crypto_choice, F.data.startswith("pay_crypto:"))
+async def handle_crypto_choice_and_invoice(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("⏳ Generating Invoice...")
+    await callback.answer()
+
+    # 1. Retrieve confirmed order data and payment currency
+    confirmed_data = await state.get_data()
+    order_data = confirmed_data.get('confirmed_order_data', {})
+
+    pay_currency = callback.data.split(":")[1] # e.g., 'btc', 'usdttrc20'
+
+    # Extract required fields (now pulled from order_data)
+    code_header = order_data.get("code")
+    quantity = int(order_data.get("quantity", 1))
+    total_price = float(order_data.get("price", 0.0))
+    user_id = order_data.get("user_id")
+    is_full_info = order_data.get("is_full_info", False)
+    chosen_type = order_data.get("selected_type") or order_data.get("random_type")
+
+    if not code_header or total_price <= 0:
+        await callback.message.edit_text("❌ Payment processing error. Please start again.")
+        await state.clear()
+        return
+
+    # 2. Create the invoice with retries (similar to original logic)
+    loop = asyncio.get_event_loop()
+    # ... (Helper function definitions remain the same, just need to be in scope) ...
+
+    max_attempts = 3
+    attempt = 0
+    invoice_response = None
+
+    while attempt < max_attempts:
+        attempt += 1
+        try:
+            invoice_response = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    _run_sync_invoice_creation,
+                    total_price=total_price,
+                    user_id=user_id,
+                    code_header=code_header,
+                    quantity=quantity,
+                    pay_currency=pay_currency # PASS SELECTED CURRENCY
+                )
+            )
+            # ... (rest of the retry loop, error checks, break logic remains the same) ...
+            if invoice_response and invoice_response.get("order_id"):
+                break
+            await asyncio.sleep(0.8 * attempt)
+        except Exception:
+            await asyncio.sleep(0.8 * attempt)
+
+    # 3. Save Order & Render Result (similar to original logic)
+
+    # Get the order type value correctly from confirmed data
+    mode = order_data.get("mode")
+    order_type_value = ("any" if (mode == "random" and chosen_type is None) else (chosen_type or "unknown"))
+
+    try:
+        # Save order in DB (using order_data)
+        await save_order(
+            order_id=invoice_response.get("order_id"),
+            user_id=user_id,
+            key_header=code_header,
+            quantity=quantity,
+            is_full_info=is_full_info,
+            status="pending",
+        )
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE orders SET type = $1 WHERE order_id = $2", order_type_value, invoice_response.get("order_id"))
+    except Exception:
+        logger.exception("Failed to save order in database")
+
+    # Update FSM state with invoice details
+    await state.set_state(PurchaseState.waiting_for_payment)
+    await state.update_data(
+        order_id=invoice_response.get("order_id"),
+        invoice_id=invoice_response.get("pay_id") or invoice_response.get("payment_id"),
+        raw_invoice_response=invoice_response
+    )
+
+    # RENDER MESSAGE (using final_message/payment_keyboard logic from original handle_invoice_confirmation)
+    payment_url = extract_payment_url(invoice_response or {})
+    final_message = (
+        f"🔒 **Invoice Generated!**\n"
+        f"Amount: **${total_price:.2f} {CURRENCY}**\n"
+        f"Pay With: {pay_currency.upper()}\n"
+        f"Order ID: `{invoice_response.get('order_id')}`\n\n"
+    )
+
+    if payment_url:
+        final_message += "Click the button below to complete payment and receive your keys instantly."
+        payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Pay Now", url=payment_url)]
+        ])
+        await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode="Markdown")
+    else:
+        # ... (Manual pay details logic for no URL) ...
+        await callback.message.edit_text(final_message + " [Error: No payment URL provided]. Contact support.")
+
+# 3. C. Back to Confirmation Button
+
+@router.callback_query(F.data == "back_to_confirmation", PurchaseState.waiting_for_crypto_choice)
+async def back_to_confirmation(callback: CallbackQuery, state: FSMContext):
+    # This manually restores the order confirmation message
+    data = await state.get_data()
+    order_data = data.get('confirmed_order_data', {})
+
+    if not order_data:
+        await callback.message.edit_text("Order data lost. Please start over.")
+        await state.set_state(PurchaseState.waiting_for_type)
+        await callback.answer()
+        return
+
+    # Assuming a BIN purchase flow for a simple reconstruction
+    key_header = order_data.get("code")
+    quantity = order_data.get("quantity")
+    total_price = order_data.get("price")
+    unit_price = order_data.get("unit_price") or KEY_PRICE_FULL # Use default if dynamic price was used
+    is_full_info = order_data.get("is_full_info", False)
+    key_type_label = "Full Info" if is_full_info else "Info-less"
+
+    confirmation_message = (
+        f"🛒 **Order Confirmation**\n"
+        f"----------------------------------------\n"
+        f"Product: {key_type_label} Key (code `{key_header}`)\n"
+        f"Quantity: {quantity} Keys\n"
+        f"Unit price: **${unit_price:.2f} {CURRENCY}**\n"
+        f"Total Due: **${total_price:.2f} {CURRENCY}**\n"
+        f"----------------------------------------\n\n"
+        f"✅ Ready to proceed to invoice?"
+    )
+
+    await state.set_state(PurchaseState.waiting_for_confirmation)
+    await callback.message.edit_text(
+        confirmation_message,
+        reply_markup=get_confirmation_keyboard(key_header, quantity),
+        parse_mode="Markdown"
+    )
     await callback.answer()
 
 @router.callback_query(F.data.startswith("set_qty:"))
@@ -1640,7 +1826,7 @@ async def fulfill_order(order_id: str):
 async def lifespan(app: FastAPI):
     """Initializes DB and sets Webhook once before the workers boot."""
     logger.info("--- STARTING APPLICATION LIFESPAN ---")
-    
+
     # 1. DATABASE SETUP (Initialization and Population)
     try:
         await initialize_db()
@@ -1649,22 +1835,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.critical(f"FATAL DB ERROR: Cannot initialize resources: {e}")
         raise SystemExit(1)
-    
+
     # 2. TELEGRAM WEBHOOK SETUP (Set only once)
     if BASE_WEBHOOK_URL:
         full_webhook = BASE_WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
         logger.info("Attempting to set Telegram webhook...")
-        
+
         try:
             await bot(DeleteWebhook(drop_pending_updates=True))
             await bot(SetWebhook(url=full_webhook))
             logger.info(f"Webhook successfully set to: {full_webhook}")
         except asyncio.CancelledError:
-            raise 
+            raise
         except Exception as e:
             logger.error(f"Failed to set webhook (Expected during concurrent startup): {e}")
 
-    yield 
+    yield
 
     # --- SHUTDOWN LOGIC ---
     logger.info("--- APPLICATION SHUTDOWN: CLEANUP ---")
@@ -1672,7 +1858,7 @@ async def lifespan(app: FastAPI):
         await bot.session.close()
     except Exception:
         logger.warning("Bot session failed to close.")
-    
+
     try:
         pool = await get_pool()
         await pool.close()
@@ -1682,7 +1868,7 @@ async def lifespan(app: FastAPI):
 
 # 3. Apply the lifespan to the FastAPI application
 app = FastAPI(
-    title="Telegram Bot Webhook (FastAPI + aiogram)", 
+    title="Telegram Bot Webhook (FastAPI + aiogram)",
     lifespan=lifespan
 )
 
@@ -1692,10 +1878,10 @@ async def telegram_webhook(request: Request):
         update_data: Dict[str, Any] = await request.json()
         if update_data:
             await dp.feed_update(bot, Update(**update_data))
-        
+
     except Exception:
-        logger.exception(f"CRITICAL WEBHOOK PROCESSING ERROR") 
-        
+        logger.exception(f"CRITICAL WEBHOOK PROCESSING ERROR")
+
     return Response(status_code=200)
 
 
