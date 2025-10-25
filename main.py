@@ -458,27 +458,34 @@ async def handle_random_qty(message: Message, state: FSMContext):
 async def confirm_random_invoice(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
 
-    # Ensure random mode context exists
+    # Get data stored during the *quoting* phase (handle_il_random_qty or handle_random_qty)
     mode = data.get("mode")
     qty = int(data.get("quantity", 0))
-    chosen_type = data.get("random_type")  # None => any
+    is_full_info = data.get("is_full_info", True) # Get correct flag
+    chosen_type = data.get("random_type")
 
-    if mode != "random" or qty <= 0:
-        await callback.answer("Order data missing — please start again.", show_alert=True)
+    # *** CRITICAL: Use the price already set in the state ***
+    total_price = float(data.get("price", 0.0))
+
+    if mode != "random" or qty <= 0 or total_price <= 0:
+        await callback.answer("Order data missing or price is zero — please start again.", show_alert=True)
         await state.clear()
         return
 
-    # Recompute price authoritatively just before issuing invoice
-    try:
-        prices = await quote_random_prices(True, qty, chosen_type)
-    except Exception:
-        await callback.message.answer("Could not re-quote price. Try again.")
-        return
+    # --- STOCK CHECK (Minimal: only check if enough *items* exist) ---
 
-    if len(prices) < qty:
-        back_cb = "fi_back_types" if chosen_type else "back_to_type"
+    # We rely on the stock check performed in the initial quantity handler (handle_il/fi_random_qty).
+    # Rerunning quote_random_prices *here* is what causes the price difference.
+    # Instead, we perform a simpler count check to ensure stock hasn't dropped since the quote.
+
+    # Get the total available count for a definitive check
+    available_stock_count = await check_stock_count_by_type(is_full_info, chosen_type)
+
+    if qty > available_stock_count:
+        # Stock insufficiency detected since the quote was generated
+        back_cb = "fi_back_types" if is_full_info else "il_back_types"
         await callback.message.edit_text(
-            "⚠️ Stock changed. Not enough random Full Info available for that quantity.",
+            f"⚠️ Stock changed! Not enough random keys available for {qty} quantity. Only {available_stock_count} remaining.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Back", callback_data=back_cb)]
             ]),
@@ -487,15 +494,25 @@ async def confirm_random_invoice(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    total_price = float(sum(prices))
+    # --- MINIMUM USD CHECK (Re-run for safety) ---
+    if total_price < MINIMUM_USD:
+        # This price should have been checked earlier, but we block here if minimum is violated.
+        back_cb = "fi_back_types" if is_full_info else "il_back_types"
+        await callback.message.edit_text(
+            f"⚠️ *Minimum payment required* is **${MINIMUM_USD:.2f}**. Your total is ${total_price:.2f}. Please increase quantity.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=back_cb)]]),
+        )
+        await callback.answer()
+        return
 
-    # Persist everything needed for invoicing
+    # Persist everything needed for invoicing (no recalculation needed)
     await state.update_data(
-        price=total_price,
-        code="*",               # random marker
-        is_full_info=True,
+        price=total_price, # Use the confirmed price
+        code="*",
+        is_full_info=is_full_info,
         mode="random",
-        quantity=qty            # keep qty consistent
+        quantity=qty
     )
 
     # Go generate the invoice

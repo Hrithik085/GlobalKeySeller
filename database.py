@@ -110,6 +110,20 @@ async def initialize_db():
               print("PostgreSQL Database table 'price_rules' and initial rules ensured to exist.")
 
 # --- Update in database.py ---
+
+async def check_stock_count_by_type(is_full_info: bool, card_type: Optional[str] = None) -> int:
+    """Returns the count of UNSOLD cards for a specific type (or all if type is None)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        query = """
+            SELECT COUNT(*) FROM card_inventory
+            WHERE is_full_info = $1 AND sold = FALSE
+              AND ($2::text IS NULL OR type = $2)
+        """
+        count = await conn.fetchval(query, is_full_info, card_type)
+        return count if count is not None else 0
+
+
 async def get_price_rule_by_type(key_type: str, purchase_mode: str = 'BY_BIN') -> Optional[float]:
     """Fetches a fixed price override for a specific key type and purchase mode."""
     pool = await get_pool()
