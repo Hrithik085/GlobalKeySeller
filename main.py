@@ -602,7 +602,9 @@ async def handle_il_type(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # FIX: Simplified decorator to catch calls from downstream states.
+# FIX: Added decorator to allow transition back from the command input state.
 @router.callback_query(F.data == "il_back_types")
+@router.callback_query(F.data == "il_back_types", PurchaseState.waiting_for_command) # <--- ADDED
 async def il_back_to_types(callback: CallbackQuery, state: FSMContext):
     """Go back to the top-level Info-less type menu."""
     try:
@@ -793,12 +795,17 @@ async def handle_il_random_qty(message: Message, state: FSMContext):
     )
 
 # --- Option 1: Command Entry (The original way) ---
-
-@router.callback_query(PurchaseState.waiting_for_il_type, F.data == "il_command:prompt")
+@router.callback_query(F.data == "il_command:prompt") # Removed FSM state for wider capture
 async def prompt_il_command_entry(callback: CallbackQuery, state: FSMContext):
     """Presents the original command prompt for Info-less keys."""
+
+    # 1. Answer the callback immediately to stop the button from spinning
+    await callback.answer()
+
+    # 2. Set the state and context
     await state.set_state(PurchaseState.waiting_for_command)
     await state.update_data(is_full_info=False)
+
     key_type_label = "Info-less"
     try:
         # NOTE: is_full_info=False
@@ -818,13 +825,14 @@ async def prompt_il_command_entry(callback: CallbackQuery, state: FSMContext):
         f"Available codes in stock: {', '.join(available_codes_formatted) if available_codes_formatted else 'None'}"
     )
 
+    # 3. Edit the message to show the guide and the back button
     await callback.message.edit_text(
         command_guide,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Back to Info-less Menu", callback_data="il_back_types")]
-        ])
+        ]),
+        parse_mode="Markdown"
     )
-    await callback.answer()
 
 @router.message(PurchaseState.waiting_for_command, F.text.startswith("get_giftCard_by_header:"))
 async def handle_giftCard_purchase_command(message: Message, state: FSMContext):
