@@ -261,7 +261,7 @@ async def start_handler(message: Message, state: FSMContext):
     support_url = SUPPORT_URL if 'SUPPORT_URL' in globals() else "https://t.me/berkher"
 
     welcome_text = (
-        "🌟 **Welcome to Rockers GiftgiftCard Shop!** 💳\n\n"
+        "🌟 **Welcome to Berkher CVV Shop!** 💳\n\n"
         "We offer high-quality Keys:\n"
         "  • Full Info CVV\n"
         "  • Non Info CVV\n\n"  # Corrected "Full Info CVV" redundancy
