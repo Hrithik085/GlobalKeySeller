@@ -132,7 +132,7 @@ def get_infoless_type_keyboard(types_with_count: List[Tuple[str,int]]) -> Inline
     rows = [[InlineKeyboardButton(text=f"{t} ({c})", callback_data=f"il_type:{t}")]
             for t, c in types_with_count[:20]]
     rows.append([InlineKeyboardButton(text="🎲 Random (any type)", callback_data="il_random:any")])
-    rows.append([InlineKeyboardButton(text="⌨️ Command Entry", callback_data="il_command:prompt")]) # New option
+    rows.append([InlineKeyboardButton(text="⌨️ Choose BIN", callback_data="il_command:prompt")]) # New option
     rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_type")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
