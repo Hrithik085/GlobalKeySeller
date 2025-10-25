@@ -1308,16 +1308,30 @@ async def handle_crypto_choice_and_invoice(callback: CallbackQuery, state: FSMCo
                     user_id=user_id,
                     code_header=code_header,
                     quantity=quantity,
-                    pay_currency=pay_currency # PASS SELECTED CURRENCY
+                    pay_currency=pay_currency
                 )
             )
-            # ... (rest of the retry loop, error checks, break logic remains the same) ...
+            # Check for API-level errors even if the request succeeds (e.g., bad API key response)
+            if invoice_response and invoice_response.get("error"):
+                 logger.error("NOWPayments API Error: %s", invoice_response)
+                 raise RuntimeError(f"NOWPayments API failed: {invoice_response.get('error_message')}")
+
             if invoice_response and invoice_response.get("order_id"):
                 break
             await asyncio.sleep(0.8 * attempt)
-        except Exception:
+
+        except Exception as exc: # <--- CATCH THE SPECIFIC EXCEPTION
+            logger.exception("NOWPayments creation failed on attempt %s", attempt, exc_info=exc)
             await asyncio.sleep(0.8 * attempt)
 
+    # --- After the loop fails ---
+    if not invoice_response:
+        logger.error("Invoice creation failed after all retries.")
+        await callback.message.edit_text("❌ Failed to generate invoice after multiple tries. Please check logs for API error.", parse_mode="Markdown")
+        await state.clear()
+        return
+
+    # ... (Rest of the function continues on success) ...
     # 3. Save Order & Render Result (similar to original logic)
 
     # Get the order type value correctly from confirmed data
