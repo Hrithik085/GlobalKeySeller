@@ -795,7 +795,7 @@ async def handle_il_random_qty(message: Message, state: FSMContext):
     )
 
 # --- Option 1: Command Entry (The original way) ---
-@router.callback_query(F.data == "il_command:prompt") # Removed FSM state for wider capture
+@router.callback_query(F.data == "il_command:prompt")
 async def prompt_il_command_entry(callback: CallbackQuery, state: FSMContext):
     """Presents the original command prompt for Info-less keys."""
 
@@ -810,19 +810,33 @@ async def prompt_il_command_entry(callback: CallbackQuery, state: FSMContext):
     try:
         # NOTE: is_full_info=False
         codes_with_count = await fetch_codes_with_count(False)
-        available_codes_formatted = [f"{code_header} ({count} left)" for code_header, count in codes_with_count]
+
+        # --- FIX: Limit the displayed codes to prevent MESSAGE_TOO_LONG error ---
+        total_available = len(codes_with_count)
+        display_limit = 10
+
+        if total_available > 0:
+            displayed_codes = [f"{header} ({count})" for header, count in codes_with_count[:display_limit]]
+            available_codes_formatted = ', '.join(displayed_codes)
+
+            if total_available > display_limit:
+                available_codes_formatted += f" (+ {total_available - display_limit} more)"
+        else:
+            available_codes_formatted = 'None'
+        # --- END FIX ---
+
     except Exception:
-        available_codes_formatted = ["DB ERROR"]
+        available_codes_formatted = "DB ERROR"
         logger.exception("Failed to fetch available codes for command menu.")
 
     command_guide = (
         f"🔐 **{key_type_label} Key Purchase Guide (Command)**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
         f"**Copy/Send this:**\n"
-        f"```\nget_Card_by_bin:<code> <Quantity>\n```\n"
+        f"```\nget_giftCard_by_header:<code> <Quantity>\n```\n"
         f"✨ Example for buying 10 Keys:\n"
-        f"**`get_Card_by_bin:456456 10`**\n\n"
-        f"Available codes in stock: {', '.join(available_codes_formatted) if available_codes_formatted else 'None'}"
+        f"**`get_giftCard_by_header:456456 10`**\n\n"
+        f"Available codes in stock: {available_codes_formatted}"
     )
 
     # 3. Edit the message to show the guide and the back button
