@@ -1211,7 +1211,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
 
     # 3. Store the final validated data and REDIRECT (SUCCESS PATH)
 
-await state.set_state(PurchaseState.waiting_for_crypto_choice)
+    await state.set_state(PurchaseState.waiting_for_crypto_choice)
     await state.update_data(
         # Pass the current, validated data dictionary to the next state for invoicing
         confirmed_order_data=data
