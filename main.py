@@ -36,7 +36,7 @@ from database import (
     # NEW:
     fetch_types_with_count, fetch_bins_by_type_with_count, quote_random_prices, get_random_keys_and_mark_sold,
     mark_order_fulfilled, get_price_by_header,
-    get_price_rule_by_type, # <--- NEWLY ADDED IMPORT
+    get_price_rule_by_type, check_stock_count_by_type,
 )
 try:
     from config import KEY_PRICE_INFOLESS, KEY_PRICE_FULL
