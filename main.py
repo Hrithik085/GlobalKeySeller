@@ -36,7 +36,7 @@ from database import (
     # NEW:
     fetch_types_with_count, fetch_bins_by_type_with_count, quote_random_prices, get_random_keys_and_mark_sold,
     mark_order_fulfilled, get_price_by_header,
-    get_price_rule_by_type, check_stock_count_by_type,
+    get_price_rule_by_type, check_stock_count_by_type, insert_countries,
 )
 try:
     from config import KEY_PRICE_INFOLESS, KEY_PRICE_FULL
@@ -249,6 +249,36 @@ async def _iter_lines_from_upload(upload: UploadFile) -> list[str]:
 async def _iter_lines_from_body(text_body: str) -> list[str]:
     return [ln.strip() for ln in text_body.splitlines() if ln.strip()]
 
+# Helper function to find a country name in the input fields
+async def _determine_country_code(fields: list[str]) -> str:
+    """
+    Tries to find the 2-letter country code ('US', 'IN', 'DE')
+    by checking common country fields in the input line.
+    """
+    country_code = 'unknown'
+
+    # Heuristic 1: Check end fields for full country name (Example File 1: last field)
+    # Fields like 'INDIA', 'KOREA, REPUBLIC OF', 'AUSTRIA', 'GERMANY'
+    if len(fields) >= 1:
+        # Check the last 1-3 fields for a country name/code, cleaning and normalizing the field content
+        search_fields = [f.strip() for f in fields[-3:] if f.strip()]
+        for name_or_code in search_fields:
+            # Try to look up by full name (requires the new database function)
+            flag_code = await get_flag_code_by_country_name(name_or_code)
+            if flag_code:
+                return flag_code
+
+    # Heuristic 2: Check middle/known address fields for 2-letter codes (Example File 2: MO/US)
+    # Since the structure is inconsistent, check any 2-letter token that looks like a country code
+    for token in fields:
+        token = token.strip().upper()
+        if len(token) == 2:
+            # Note: This relies on the 'countries' table also containing the codes
+            flag_code = await get_flag_code_by_country_name(token)
+            if flag_code:
+                return flag_code
+
+    return country_code # Default back to 'unknown' if not found
 
 # --- 6. HANDLERS (Application Logic) ---
 
@@ -1830,6 +1860,102 @@ async def ingest_masked_lines(
         "problems": problems[:100],  # cap to keep response small
         "note": "Only masked/hashed rows are accepted. Rows resembling clear PANs are rejected.",
     }
+
+
+
+# Add this function to your main application file (main.py)
+@app.post("/ingest-countries")
+async def ingest_countries_data(data: List[Dict[str, Any]] = Body(..., description="List of country objects")):
+    """
+    Accepts a list of country data objects and saves them to the 'countries' table.
+    """
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty data list provided.")
+
+    try:
+        # NOTE: You must ensure all required keys are present before calling insert_countries
+        required_keys = ['flagCode', 'country', 'cca2', 'cca3', 'ccn3']
+        for item in data:
+            if not all(key in item for key in required_keys):
+                raise HTTPException(status_code=400, detail="Missing required keys in country data.")
+
+        await insert_countries(data)
+
+        return {
+            "status": "success",
+            "message": f"Successfully inserted/updated {len(data)} country records."
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to ingest country data.")
+        raise HTTPException(status_code=500, detail=f"Database error during ingestion: {e}")
+
+@app.post("/uploadAll")
+async def ingest_masked_lines(
+    # --- PRICE IS STILL REQUIRED, BUT TYPE IS REMOVED ---
+    unit_price: float = Body(..., ge=0.01, description="The price for each key in this batch"),
+    # ------------------------------------
+    file: UploadFile | None = File(default=None, description="Text file with pipe-delimited masked/hashed rows"),
+    body_text: str | None = Body(default=None, media_type="text/plain", description="Raw text with rows separated by newlines"),
+):
+    """
+    Automates type determination based on country information in the row.
+    """
+    if not file and not body_text:
+        raise HTTPException(status_code=400, detail="Provide a text file or plain-text body.")
+
+    try:
+        lines = await _iter_lines_from_upload(file) if file else await _iter_lines_from_body(body_text)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not read input. Provide UTF-8 text.")
+
+    if not lines:
+        raise HTTPException(status_code=400, detail="No rows found.")
+
+    # Process rows
+    accepted, rejected = 0, 0
+    problems: list[dict] = []
+
+    for idx, line in enumerate(lines, start=1):
+        fields = line.split("|")
+
+        # 1. Extract and check for a 6-digit prefix
+        prefix6 = extract_prefix6(fields)
+        if not prefix6:
+            rejected += 1
+            problems.append({"line": idx, "reason": "no 6-digit prefix found in first two fields"})
+            continue
+
+        # 2. Heuristic full-info classification
+        full_info = is_full_info_row(fields)
+
+        # 3. Determine the key_type using country lookup
+        determined_key_type = await _determine_country_code(fields)
+
+        # 4. Persist
+        try:
+            await add_key(
+                key_detail=line,
+                key_header=prefix6,
+                is_full_info=full_info,
+                key_type=determined_key_type, # <-- USE DETERMINED TYPE
+                price=unit_price
+            )
+            accepted += 1
+        except Exception as e:
+            rejected += 1
+            problems.append({"line": idx, "reason": f"db error: {type(e).__name__}"})
+
+    return {
+        "status": "ok",
+        "accepted": accepted,
+        "rejected": rejected,
+        "problems": problems[:100],  # cap to keep response small
+        "note": "Type determined automatically by country lookup. Only masked/hashed rows accepted.",
+    }
+
 
 @app.get("/")
 def health_check():

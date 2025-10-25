@@ -119,7 +119,71 @@ async def initialize_db():
               """)
               print("PostgreSQL Database table 'price_rules' and initial rules ensured to exist.")
 
+
+              # --- Create countries table IF NOT EXISTS ---
+                      await conn.execute("""
+                          CREATE TABLE IF NOT EXISTS countries (
+                              id SERIAL PRIMARY KEY,
+                              flag_code TEXT NOT NULL UNIQUE,
+                              country TEXT NOT NULL,
+                              cca2 TEXT NOT NULL,
+                              cca3 TEXT NOT NULL,
+                              ccn3 INT
+                          )
+                      """)
+                      print("PostgreSQL Database table 'countries' ensured to exist.")
+
+
 # --- Update in database.py ---
+
+# Add this function to database.py
+async def insert_countries(country_list: List[Dict[str, Any]]):
+    """Inserts a list of country records, skipping duplicates based on flag_code."""
+    pool = await get_pool()
+    # Build the list of records for executemany
+    records = [
+        (c['flagCode'], c['country'], c['cca2'], c['cca3'], c['ccn3'])
+        for c in country_list
+    ]
+
+    # Use executemany for efficiency
+    async with pool.acquire() as conn:
+        result = await conn.executemany(
+            """
+            INSERT INTO countries (flag_code, country, cca2, cca3, ccn3)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (flag_code) DO NOTHING
+            """,
+            records
+        )
+    return result
+
+# Add this to database.py
+async def get_flag_code_by_country_name(country_name: str) -> Optional[str]:
+    """Looks up a 2-letter flag code (cca2) based on the full country name."""
+    if not country_name:
+        return None
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Use ILIKE for case-insensitive partial/fuzzy matching, but wrap with TRIM/LOWER for safety
+        # NOTE: Using exact match with TRIM and normalization is safer for quality control
+        code = await conn.fetchval("""
+            SELECT cca2 FROM countries
+            WHERE country ILIKE TRIM($1)
+            LIMIT 1
+        """, country_name)
+
+        # If not found by full name, try searching for codes like 'US' in country field itself
+        if code is None and len(country_name) == 2:
+            code = await conn.fetchval("""
+                SELECT cca2 FROM countries
+                WHERE cca2 = UPPER(TRIM($1))
+                LIMIT 1
+            """, country_name)
+
+        return code
+
 
 async def check_stock_count_by_type(is_full_info: bool, card_type: Optional[str] = None) -> int:
     """Returns the count of UNSOLD cards for a specific type (or all if type is None)."""
