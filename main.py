@@ -657,10 +657,8 @@ async def handle_il_bin_choice(callback: CallbackQuery, state: FSMContext):
     override_price = await get_price_rule_by_type(card_type, is_full_info, purchase_mode='BY_BIN')
 
     if override_price is not None:
-        # Use the fixed price if the rule is found (e.g., $15.00 for Non Info USA)
         display_price = override_price
     else:
-        # Otherwise, fall back to the price stored in the inventory table
         inventory_price = await get_price_by_header(key_header, is_full_info)
         display_price = inventory_price if inventory_price is not None else KEY_PRICE_INFOLESS
     # --- PRICE OVERRIDE CHECK END ---
@@ -673,12 +671,10 @@ async def handle_il_bin_choice(callback: CallbackQuery, state: FSMContext):
         "Enter **quantity** (e.g., `5`).",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            # FIX: Use the generic, reliable "il_back_types" callback
-            [InlineKeyboardButton(text="⬅️ Back", callback_data="il_back_types")]
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="il_back_types")] # <--- FIX APPLIED
         ])
     )
     await callback.answer()
-
 # You must ensure get_price_rule_by_type is imported from database.py at the top
 # Assuming the necessary change has been made to the get_price_rule_by_type signature
 # in database.py (to accept is_full_info as the second argument).
@@ -1210,218 +1206,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             await callback.answer()
             return
 
-    # --- END Consolidated Stock/Minimum Checks ---
 
-
-    # 3. Store the final validated data and REDIRECT (SUCCESS PATH)
-
-    await state.set_state(PurchaseState.waiting_for_crypto_choice)
-    await state.update_data(
-        # Pass the current, validated data dictionary to the next state for invoicing
-        confirmed_order_data=data
-    )
-
-    # 4. Redirect user to the crypto selection menu
-    await callback.message.edit_text(
-        "🪙 **Choose Your Payment Currency**\n\n"
-        f"Your total amount due is **${total_price:.2f} {CURRENCY}**.\n"
-        "Please select the cryptocurrency you wish to pay with:",
-        reply_markup=get_crypto_choice_keyboard(),
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-    # --- Create the invoice with retries ---
-    # ... (rest of the function remains the same)
-
-    # ... (Existing code for Create the invoice with retries block) ...
-    loop = asyncio.get_event_loop()
-
-    def extract_payment_url(resp: dict) -> Optional[str]:
-        if not isinstance(resp, dict):
-            return None
-        for key in ("invoice_url", "pay_url", "payment_url", "url", "checkout_url", "gateway_url"):
-            val = resp.get(key)
-            if val:
-                return val
-        links = resp.get("links") or resp.get("link") or resp.get("payment_links")
-        if isinstance(links, dict):
-            for v in links.values():
-                if isinstance(v, str) and v.startswith("http"):
-                    return v
-        if isinstance(links, list):
-            for item in links:
-                if isinstance(item, dict):
-                    for v in item.values():
-                        if isinstance(v, str) and v.startswith("http"):
-                            return v
-                if isinstance(item, str) and item.startswith("http"):
-                    return item
-        return None
-
-    max_attempts = 3
-    attempt = 0
-    invoice_response = None
-    last_exception = None
-
-    while attempt < max_attempts:
-        attempt += 1
-        try:
-            invoice_response = await loop.run_in_executor(
-                None,
-                functools.partial(
-                    _run_sync_invoice_creation,
-                    total_price=total_price,
-                    user_id=user_id,
-                    code_header=code_header,
-                    quantity=quantity
-                )
-            )
-            logger.info(f"NOWPayments create_payment response (attempt {attempt}): {invoice_response}")
-
-            # Save raw response into state for later "show_payment" lookups
-            try:
-                await state.update_data(raw_invoice_response=invoice_response)
-            except Exception:
-                logger.debug("Failed to save raw_invoice_response to state.")
-
-            # Save order in DB (include type). Prefer inserting type with the row.
-            try:
-                order_type_value = ("any" if (mode == "random" and chosen_type is None) else (chosen_type or data.get("selected_type") or "unknown"))
-
-                # If your save_order helper supports 'type', pass it. If not, you can update after insert.
-                # Here: attempt to call save_order with type if it accepts it; fallback to update.
-                try:
-                    # try to call save_order with a 'type' param (if implemented)
-                    await save_order(
-                        order_id=invoice_response.get("order_id"),
-                        user_id=user_id,
-                        key_header=code_header,
-                        quantity=quantity,
-                        is_full_info=is_full_info,
-                        status="pending",
-                    )
-                    # persist type via lightweight update (works with your current helper)
-                    pool = await get_pool()
-                    async with pool.acquire() as conn:
-                        await conn.execute("UPDATE orders SET type = $1 WHERE order_id = $2", order_type_value, invoice_response.get("order_id"))
-                except TypeError:
-                    # if save_order signature was changed to accept `type` already, call with it:
-                    await save_order(
-                        order_id=invoice_response.get("order_id"),
-                        user_id=user_id,
-                        key_header=code_header,
-                        quantity=quantity,
-                        is_full_info=is_full_info,
-                        status="pending",
-                    )
-                    pool = await get_pool()
-                    async with pool.acquire() as conn:
-                        await conn.execute("UPDATE orders SET type = $1 WHERE order_id = $2", order_type_value, invoice_response.get("order_id"))
-
-                logger.info("Order saved: user=%s order_id=%s type=%s", user_id, invoice_response.get("order_id"), order_type_value)
-            except Exception:
-                logger.exception("Failed to save order in database")
-
-            payment_url = extract_payment_url(invoice_response or {})
-            if payment_url:
-                break
-            else:
-                logger.warning(f"No payment URL in NOWPayments response (attempt {attempt}). order_id={invoice_response.get('order_id') if isinstance(invoice_response, dict) else 'N/A'}")
-                await asyncio.sleep(0.8 * attempt)
-        except Exception as exc:
-            last_exception = exc
-            logger.exception(f"NOWPayments create_payment raised exception on attempt {attempt}: {exc}")
-            await asyncio.sleep(0.8 * attempt)
-
-    # --- Render result to the user ---
-    try:
-        if not invoice_response:
-            logger.error(f"NOWPayments create_payment returned no response after {max_attempts} attempts for user {user_id}")
-            try:
-                await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
-            except Exception:
-                logger.exception("Failed to notify user about payment error.")
-            await state.clear()
-            await callback.answer()
-            return
-
-        payment_url = extract_payment_url(invoice_response or {})
-
-        try:
-            await state.update_data(
-                order_id=invoice_response.get("order_id"),
-                invoice_id=invoice_response.get("pay_id") or invoice_response.get("payment_id")
-            )
-        except Exception:
-            logger.debug("Failed to update state with order/invoice ids.")
-
-        final_message = (
-            f"🔒 **Invoice Generated!**\n"
-            f"Amount: **${total_price:.2f} {CURRENCY}**\n"
-            f"Pay With: USDT (TRC20)\n"
-            f"Order ID: `{invoice_response.get('order_id')}`\n\n"
-        )
-
-        if payment_url:
-            final_message += "Click the button below to complete payment and receive your keys instantly."
-            payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Pay Now", url=payment_url)]
-            ])
-            await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode="Markdown")
-        else:
-            invoice_id = (
-                invoice_response.get("pay_id")
-                or invoice_response.get("payment_id")
-                or invoice_response.get("id")
-                or invoice_response.get("invoice_id")
-                or "N/A"
-            )
-
-            pay_address = invoice_response.get("pay_address") or invoice_response.get("address") or invoice_response.get("wallet_address")
-            pay_amount = invoice_response.get("pay_amount") or invoice_response.get("price_amount") or invoice_response.get("amount")
-            pay_currency = invoice_response.get("pay_currency") or invoice_response.get("price_currency") or "USD"
-            network = invoice_response.get("network") or invoice_response.get("chain") or "N/A"
-
-            support_contact = SUPPORT_URL
-            logger.warning("NOWPayments returned invoice without payment URL after retries. order_id=%s invoice_id=%s user_id=%s",
-                           invoice_response.get("order_id"), invoice_id, user_id)
-            final_message += f"Invoice ID: `{invoice_id}`\n\n"
-
-            if pay_address and pay_amount:
-                final_message += (
-                    "Tap the button below to view exact payment details (address, amount and network) so you can pay manually.\n\n"
-
-                )
-                cb_invoice_identifier = invoice_id if invoice_id != "N/A" else (invoice_response.get("payment_id") or invoice_response.get("pay_id") or "unknown")
-                payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="Show Payment Details", callback_data=f"show_payment:{cb_invoice_identifier}")]
-                ])
-                await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode="Markdown")
-            else:
-                final_message += (
-                    f"Please contact support ({SUPPORT_URL}) or try again in a moment. "
-                    "If you believe this is an error, provide the Order ID above to support."
-                )
-                await callback.message.edit_text(final_message, parse_mode="Markdown")
-
-            try:
-                await callback.message.answer(
-                    "If you need help completing payment, contact our support with the Order ID shown above.\n\n"
-                    f"Support: {SUPPORT_URL}",
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                logger.debug("Could not send follow-up support message to the user.")
-    except Exception as e:
-        logger.exception(f"NOWPayments Invoice processing failed for user {user_id}: {e}")
-        try:
-            await callback.message.edit_text("❌ **Payment Error:** Could not generate invoice. Please contact support.")
-        except Exception:
-            logger.exception("Failed to send payment error message to user.")
-        await state.clear()
-
-    await callback.answer()
 def _run_sync_invoice_creation(total_price, user_id, code_header, quantity, pay_currency): # UPDATED SIGNATURE
     """Synchronous API call run inside a thread."""
     return nowpayments_client.create_payment(
