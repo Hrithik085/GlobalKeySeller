@@ -1222,7 +1222,32 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         parse_mode="Markdown"
     )
     await callback.answer()
+# --- Insert this function into your main.py file near the other utility functions ---
 
+def extract_payment_url(resp: dict) -> Optional[str]:
+    """Extracts a valid payment URL from the NOWPayments API response."""
+    if not isinstance(resp, dict):
+        return None
+    for key in ("invoice_url", "pay_url", "payment_url", "url", "checkout_url", "gateway_url"):
+        val = resp.get(key)
+        if val:
+            return val
+    links = resp.get("links") or resp.get("link") or resp.get("payment_links")
+    if isinstance(links, dict):
+        for v in links.values():
+            if isinstance(v, str) and v.startswith("http"):
+                return v
+    if isinstance(links, list):
+        for item in links:
+            if isinstance(item, dict):
+                for v in item.values():
+                    if isinstance(v, str) and v.startswith("http"):
+                        return v
+            if isinstance(item, str) and item.startswith("http"):
+                return item
+    return None
+
+# --- End of Insertion ---
 
 def _run_sync_invoice_creation(total_price, user_id, code_header, quantity, pay_currency): # UPDATED SIGNATURE
     """Synchronous API call run inside a thread."""
