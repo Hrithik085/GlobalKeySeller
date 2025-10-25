@@ -1156,8 +1156,8 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         total_price = quantity * unit_price
 
         # Must update state if price changed due to error flow or default, and update local dict
-        await state.update_data(price=total_price)
-        data['price'] = total_price
+    await state.update_data(price=total_price)
+        data['price'] = total_price # This line is fine, provided it's aligned.
 
         if total_price < MINIMUM_USD:
             import math
