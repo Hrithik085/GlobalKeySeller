@@ -58,82 +58,77 @@ def get_raw_connection_params(url: str) -> dict:
     }
 
 # --- Database Schema Functions ---
+# --- Database Schema Functions ---
 async def initialize_db():
-    """Create the card_inventory and orders tables only if they don't already exist."""
+    """Create all necessary tables if they don't already exist."""
     pool = await get_pool()
     async with pool.acquire() as conn:
 
-      # --- Create card_inventory table IF NOT EXISTS ---
-              await conn.execute("""
-                  CREATE TABLE IF NOT EXISTS card_inventory (
-                      id SERIAL PRIMARY KEY,
-                      key_detail TEXT NOT NULL,
-                      key_header TEXT NOT NULL,
-                      is_full_info BOOLEAN NOT NULL,
-                      sold BOOLEAN NOT NULL DEFAULT FALSE,
-                      type TEXT NOT NULL DEFAULT 'unknown',
-                      price NUMERIC(10,2) NOT NULL DEFAULT 5.00
-                  )
-              """)
-              print("PostgreSQL Database table 'card_inventory' ensured to exist.")
+        # --- Create card_inventory table IF NOT EXISTS (Corrected Indent) ---
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS card_inventory (
+                id SERIAL PRIMARY KEY,
+                key_detail TEXT NOT NULL,
+                key_header TEXT NOT NULL,
+                is_full_info BOOLEAN NOT NULL,
+                sold BOOLEAN NOT NULL DEFAULT FALSE,
+                type TEXT NOT NULL DEFAULT 'unknown',
+                price NUMERIC(10,2) NOT NULL DEFAULT 5.00
+            )
+        """)
+        print("PostgreSQL Database table 'card_inventory' ensured to exist.")
 
-              # --- Create orders table IF NOT EXISTS ---
-              await conn.execute("""
-                  CREATE TABLE IF NOT EXISTS orders (
-                      order_id TEXT PRIMARY KEY,
-                      user_id BIGINT NOT NULL,
-                      key_header TEXT NOT NULL,
-                      quantity INT NOT NULL,
-                      is_full_info BOOLEAN NOT NULL,
-                      type TEXT NOT NULL DEFAULT 'unknown',
-                      fulfilled BOOLEAN NOT NULL DEFAULT FALSE,
-                      status TEXT DEFAULT 'pending'
-                  )
-              """)
-              print("PostgreSQL Database table 'orders' ensured to exist.")
+        # --- Create orders table IF NOT EXISTS (Corrected Indent) ---
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                order_id TEXT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                key_header TEXT NOT NULL,
+                quantity INT NOT NULL,
+                is_full_info BOOLEAN NOT NULL,
+                type TEXT NOT NULL DEFAULT 'unknown',
+                fulfilled BOOLEAN NOT NULL DEFAULT FALSE,
+                status TEXT DEFAULT 'pending'
+            )
+        """)
+        print("PostgreSQL Database table 'orders' ensured to exist.")
 
-              # --- Create price_rules table IF NOT EXISTS (FIXED INDENTATION) ---
-              await conn.execute("""
-                  -- NOTE: The UNIQUE constraint on key_type must be changed to a composite key
-                  -- to allow two entries for 'USA' (one Full Info, one Non-Info).
-                  CREATE TABLE IF NOT EXISTS price_rules (
-                      rule_id SERIAL PRIMARY KEY,
-                      key_type TEXT NOT NULL,
-                      is_full_info BOOLEAN NOT NULL, -- <--- NEW FIELD
-                      purchase_mode TEXT NOT NULL DEFAULT 'BY_BIN',
-                      fixed_price NUMERIC(10,2) NOT NULL,
-                      is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                      UNIQUE (key_type, is_full_info) -- <--- UPDATED UNIQUE CONSTRAINT
-                  );
+        # --- Create price_rules table IF NOT EXISTS (Corrected Indent) ---
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS price_rules (
+                rule_id SERIAL PRIMARY KEY,
+                key_type TEXT NOT NULL,
+                is_full_info BOOLEAN NOT NULL,
+                purchase_mode TEXT NOT NULL DEFAULT 'BY_BIN',
+                fixed_price NUMERIC(10,2) NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                UNIQUE (key_type, is_full_info)
+            );
 
-                  -- Insert the new rules:
-                  -- 1. Full Info USA: $20.00
-                  INSERT INTO price_rules (key_type, is_full_info, fixed_price)
-                  VALUES ('USA', TRUE, 20.00)
-                  ON CONFLICT (key_type, is_full_info) DO UPDATE SET fixed_price = 20.00, is_active = TRUE;
+            -- Insert the new rules:
+            INSERT INTO price_rules (key_type, is_full_info, fixed_price)
+            VALUES ('USA', TRUE, 20.00)
+            ON CONFLICT (key_type, is_full_info) DO UPDATE SET fixed_price = 20.00, is_active = TRUE;
 
-                  -- 2. Non-Info USA: $15.00
-                  INSERT INTO price_rules (key_type, is_full_info, fixed_price)
-                  VALUES ('USA', FALSE, 15.00)
-                  ON CONFLICT (key_type, is_full_info) DO UPDATE SET fixed_price = 15.00, is_active = TRUE;
-              """)
-              print("PostgreSQL Database table 'price_rules' and initial rules ensured to exist.")
+            INSERT INTO price_rules (key_type, is_full_info, fixed_price)
+            VALUES ('USA', FALSE, 15.00)
+            ON CONFLICT (key_type, is_full_info) DO UPDATE SET fixed_price = 15.00, is_active = TRUE;
+        """)
+        print("PostgreSQL Database table 'price_rules' and initial rules ensured to exist.")
 
 
-              # --- Create countries table IF NOT EXISTS ---
-                      await conn.execute("""
-                          CREATE TABLE IF NOT EXISTS countries (
-                              id SERIAL PRIMARY KEY,
-                              flag_code TEXT NOT NULL UNIQUE,
-                              country TEXT NOT NULL,
-                              cca2 TEXT NOT NULL,
-                              cca3 TEXT NOT NULL,
-                              ccn3 INT
-                          )
-                      """)
-                      print("PostgreSQL Database table 'countries' ensured to exist.")
-
-
+        # --- Create countries table IF NOT EXISTS (Corrected Indent) ---
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS countries (
+                id SERIAL PRIMARY KEY,
+                flag_code TEXT NOT NULL UNIQUE,
+                country TEXT NOT NULL,
+                cca2 TEXT NOT NULL,
+                cca3 TEXT NOT NULL,
+                ccn3 INT
+            )
+        """)
+        print("PostgreSQL Database table 'countries' ensured to exist.")
 # --- Update in database.py ---
 
 # Add this function to database.py
