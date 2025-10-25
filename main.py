@@ -833,9 +833,9 @@ async def prompt_il_command_entry(callback: CallbackQuery, state: FSMContext):
         f"🔐 **{key_type_label} Key Purchase Guide (Command)**\n\n"
         f"📝 To place an order, send a command in the following format:\n"
         f"**Copy/Send this:**\n"
-        f"```\nget_giftCard_by_header:<code> <Quantity>\n```\n"
+        f"```\nget_Card_by_bin:<code> <Quantity>\n```\n"
         f"✨ Example for buying 10 Keys:\n"
-        f"**`get_giftCard_by_header:456456 10`**\n\n"
+        f"**`get_Card_by_bin:456456 10`**\n\n"
         f"Available codes in stock: {available_codes_formatted}"
     )
 
