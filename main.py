@@ -420,6 +420,7 @@ async def back_from_random_qty_to_start(callback: CallbackQuery, state: FSMConte
     await callback.answer()
 
 @router.callback_query(PurchaseState.waiting_for_fi_type, F.data.startswith("fi_type:"))
+@router.callback_query(PurchaseState.waiting_for_bin_qty, F.data.startswith("fi_type:")) # <--- ADDED FIX
 async def handle_fi_type(callback: CallbackQuery, state: FSMContext):
     card_type = callback.data.split(":", 1)[1]
     await state.update_data(selected_type=card_type)
