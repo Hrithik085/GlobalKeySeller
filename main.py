@@ -273,7 +273,7 @@ async def start_handler(message: Message, state: FSMContext):
         "🔐 Your security is our top priority\n\n"
         "🆘 **Need Help?** Contact Support: [berkher](%s)\n\n"
         "**Please choose your product type below:**"
-    ) % support_url
+    )
 
     await message.answer(welcome_text, reply_markup=get_key_type_keyboard())
 
@@ -1205,7 +1205,7 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             if pay_address and pay_amount:
                 final_message += (
                     "Tap the button below to view exact payment details (address, amount and network) so you can pay manually.\n\n"
-                    f"If you need help, contact support here: {SUPPORT_URL}."
+
                 )
                 cb_invoice_identifier = invoice_id if invoice_id != "N/A" else (invoice_response.get("payment_id") or invoice_response.get("pay_id") or "unknown")
                 payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
