@@ -325,9 +325,10 @@ def get_confirmation_keyboard(code_header: str, quantity: int) -> InlineKeyboard
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data == "back_to_type")
 @router.callback_query(PurchaseState.waiting_for_fi_type, F.data == "back_to_type")
 @router.callback_query(PurchaseState.waiting_for_il_type, F.data == "back_to_type")
-@router.callback_query(PurchaseState.waiting_for_random_qty, F.data == "back_to_type")      # <--- ADDED FIX: FI Random QTY
-@router.callback_query(PurchaseState.waiting_for_il_random_qty, F.data == "back_to_type")  # <--- ADDED FIX: IL Random QTY
+@router.callback_query(PurchaseState.waiting_for_random_qty, F.data == "back_to_type")
+@router.callback_query(PurchaseState.waiting_for_il_random_qty, F.data == "back_to_type")
 async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
+    # Handles all explicit "back to start" clicks regardless of previous state.
     if callback.data == "back_to_type":
         await start_handler(callback.message, state)
         await callback.answer()
@@ -345,6 +346,9 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
             logger.exception("Failed to load types for Full Info menu.")
 
         if not types_with_count:
+            # FIX: Explicitly set state to the starting menu state before showing stock-out message.
+            await state.set_state(PurchaseState.waiting_for_type)
+
             await callback.message.edit_text(
                 "No Full Info stock available right now.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -373,6 +377,9 @@ async def handle_type_selection(callback: CallbackQuery, state: FSMContext):
             logger.exception("Failed to load types for Info-less menu.")
 
         if not types_with_count:
+            # FIX: Explicitly set state to the starting menu state before showing stock-out message.
+            await state.set_state(PurchaseState.waiting_for_type)
+
             await callback.message.edit_text(
                 "No Info-less stock available right now.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
