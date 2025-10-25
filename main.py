@@ -1343,23 +1343,53 @@ async def handle_crypto_choice_and_invoice(callback: CallbackQuery, state: FSMCo
     )
 
     # RENDER MESSAGE (using final_message/payment_keyboard logic from original handle_invoice_confirmation)
-    payment_url = extract_payment_url(invoice_response or {})
-    final_message = (
-        f"🔒 **Invoice Generated!**\n"
-        f"Amount: **${total_price:.2f} {CURRENCY}**\n"
-        f"Pay With: {pay_currency.upper()}\n"
-        f"Order ID: `{invoice_response.get('order_id')}`\n\n"
-    )
+   payment_url = extract_payment_url(invoice_response or {})
 
-    if payment_url:
-        final_message += "Click the button below to complete payment and receive your keys instantly."
-        payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Pay Now", url=payment_url)]
-        ])
-        await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode="Markdown")
-    else:
-        # ... (Manual pay details logic for no URL) ...
-        await callback.message.edit_text(final_message + " [Error: No payment URL provided]. Contact support.")
+       # Extract manual payment details for fallback
+       pay_address, pay_amount, pay_currency, network, invoice_id = _extract_low_level_payment_details(invoice_response or {})
+       invoice_id = invoice_id or "N/A" # Ensure invoice_id is set
+
+       final_message = (
+           f"🔒 **Invoice Generated!**\n"
+           f"Amount: **${total_price:.2f} {CURRENCY}**\n"
+           f"Pay With: {pay_currency.upper()}\n"
+           f"Order ID: `{invoice_response.get('order_id')}`\n\n"
+       )
+
+       if payment_url:
+           final_message += "Click the button below to complete payment and receive your keys instantly."
+           payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+               [InlineKeyboardButton(text="Pay Now", url=payment_url)]
+           ])
+           await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode="Markdown")
+
+       elif pay_address and pay_amount:
+           # Fallback: Show 'Show Payment Details' button for manual payment
+
+           final_message += f"Invoice ID: `{invoice_id}`\n\n"
+           final_message += (
+               "Tap the button below to view exact payment details (address, amount and network) so you can pay manually.\n\n"
+           )
+           cb_invoice_identifier = invoice_id if invoice_id != "N/A" else (invoice_response.get("payment_id") or invoice_response.get("pay_id") or "unknown")
+           payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+               [InlineKeyboardButton(text="Show Payment Details", callback_data=f"show_payment:{cb_invoice_identifier}")]
+           ])
+           await callback.message.edit_text(final_message, reply_markup=payment_keyboard, parse_mode="Markdown")
+
+           # Send follow-up support message (as you had before)
+           try:
+               await callback.message.answer(
+                   "If you need help completing payment, contact our support with the Order ID shown above.\n\n"
+                   f"Support: {SUPPORT_URL}",
+                   parse_mode="Markdown"
+               )
+           except Exception:
+               logger.debug("Could not send follow-up support message to the user.")
+
+       else:
+           # Absolute failure case (no URL, no manual address details)
+           final_message += f"Payment processing failed. Please contact support ({SUPPORT_URL}) with your Order ID."
+           await callback.message.edit_text(final_message, parse_mode="Markdown")
 
 # 3. C. Back to Confirmation Button
 
