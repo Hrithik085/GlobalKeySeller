@@ -1067,7 +1067,6 @@ async def handle_bin_qty(message: Message, state: FSMContext):
     )
 
 
-
 @router.callback_query(PurchaseState.waiting_for_confirmation, F.data.startswith("confirm"))
 async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext):
     """
@@ -1075,8 +1074,8 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
     2. Stores confirmed order data.
     3. Redirects user to the cryptocurrency selection menu.
     """
-    # 1. RETRIEVE ALL DATA AND DECLARE SCOPE AT THE TOP
-    # NOTE: The data must be retrieved *first* before any logic uses its content.
+
+    # 1. RETRIEVE ALL DATA AND DECLARE SCOPE AT THE TOP (FIXED POSITION)
     data = await state.get_data()
     code_header = data.get("code")
     quantity = int(data.get("quantity", 1))
@@ -1094,13 +1093,12 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         await state.clear()
         return
 
-    # --- Enforce MINIMUM_USD & validate stock (Cleaned-up and Consolidated Logic) ---
+    # --- Enforce MINIMUM_USD & validate stock (EXISTING BLOCK REMAINS UNCHANGED) ---
 
     if mode == "random":
         # 1. Random Price/Stock Update Check
         prices = None
         if total_price <= 0:
-            # Re-quote if price is zero (necessary for safety, though should be set by random handler)
             prices = await quote_random_prices(is_full_info, quantity, chosen_type)
             if len(prices) < quantity:
                 back_cb = "fi_back_types" if chosen_type else "back_to_type"
@@ -1130,11 +1128,9 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
         # 1. BIN Stock Check
         available_stock = await check_stock_count(code_header, is_full_info)
         if quantity > available_stock:
-            msg = (
-                f"⚠️ Stock changed for code `{code_header}`.\n"
-                f"Available now: *{available_stock}* | Requested: *{quantity}*.\n\n"
-                "Choose an option:"
-            )
+            msg = (f"⚠️ Stock changed for code `{code_header}`.\n"
+                   f"Available now: *{available_stock}* | Requested: *{quantity}*.\n\n"
+                   "Choose an option:")
             kb_rows = []
             if available_stock > 0:
                 kb_rows.append([InlineKeyboardButton(text=f"Use {available_stock}", callback_data=f"set_qty:{available_stock}")])
@@ -1205,6 +1201,27 @@ async def handle_invoice_confirmation(callback: CallbackQuery, state: FSMContext
             await callback.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
             await callback.answer()
             return
+
+    # --- END Consolidated Stock/Minimum Checks ---
+
+
+    # 3. Store the final validated data and REDIRECT (SUCCESS PATH)
+
+    await state.set_state(PurchaseState.waiting_for_crypto_choice)
+    await state.update_data(
+        # Pass the current, validated data dictionary to the next state for invoicing
+        confirmed_order_data=data
+    )
+
+    # 4. Redirect user to the crypto selection menu
+    await callback.message.edit_text(
+        "🪙 **Choose Your Payment Currency**\n\n"
+        f"Your total amount due is **${total_price:.2f} {CURRENCY}**.\n"
+        "Please select the cryptocurrency you wish to pay with:",
+        reply_markup=get_crypto_choice_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
 
 
 def _run_sync_invoice_creation(total_price, user_id, code_header, quantity, pay_currency): # UPDATED SIGNATURE
